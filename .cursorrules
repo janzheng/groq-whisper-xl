@@ -1,0 +1,1 @@
+- you can't use `${}` in alpinejs inline string htmls! they'll break other formatting

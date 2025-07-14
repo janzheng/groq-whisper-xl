@@ -1,0 +1,44 @@
+# Example Wrangler configuration for Groq Whisper XL
+# Copy this file to wrangler.toml and update with your actual values
+
+name = "your-groq-whisper-worker-name"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+[env.development]
+vars = { ENVIRONMENT = "development" }
+
+# R2 bucket for storing audio files
+# You'll need to create these buckets in your Cloudflare dashboard
+[[r2_buckets]]
+binding = "AUDIO_BUCKET"
+bucket_name = "your-groq-whisper-audio-bucket"
+preview_bucket_name = "your-groq-whisper-audio-preview-bucket"
+
+# KV for storing job status, progress tracking, and file metadata
+# You'll need to create these KV namespaces in your Cloudflare dashboard
+[[kv_namespaces]]
+binding = "GROQ_JOBS_KV"
+id = "your-production-kv-namespace-id"
+preview_id = "your-preview-kv-namespace-id"
+
+# Environment variables (set these in Cloudflare dashboard or use wrangler secret)
+# GROQ_API_KEY = "your-groq-api-key"
+# ALLOWED_ORIGINS = "https://yourdomain.com,http://localhost:3000" 
+
+# Queues for background processing
+# You'll need to create these queues in your Cloudflare dashboard
+[[queues.producers]]
+binding = "GROQ_PROCESSING_QUEUE"
+queue = "your-groq-processing-queue"
+
+[[queues.consumers]]
+queue = "your-groq-processing-queue"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "your-groq-processing-dlq" 

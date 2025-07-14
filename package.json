@@ -1,0 +1,33 @@
+{
+  "name": "groq-whisper-xl",
+  "version": "1.0.0",
+  "description": "Universal audio transcription with Groq Whisper API",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "groq-whisper": "./cli.js"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "cli": "node cli.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.645.0",
+    "@aws-sdk/s3-request-presigner": "^3.645.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "wrangler": "^3.78.12"
+  },
+  "keywords": [
+    "groq",
+    "whisper",
+    "transcription",
+    "audio",
+    "cloudflare-workers"
+  ],
+  "author": "",
+  "license": "MIT"
+}
