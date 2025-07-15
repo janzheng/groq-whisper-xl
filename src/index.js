@@ -195,34 +195,83 @@ async function handleUrlUpload(request, env) {
       }), { status: 400 });
     }
     
-    // Validate URL
+    // Validate and normalize URL
     let parsedUrl;
+    let finalUrl;
     try {
-      parsedUrl = new URL(audioUrl);
+      // Handle URLs with special characters and encoding
+      const normalizedUrl = audioUrl.trim();
+      
+      // For signed URLs like Libsyn, we need to be careful with encoding
+      // Don't double-encode already encoded characters
+      finalUrl = normalizedUrl;
+      parsedUrl = new URL(finalUrl);
+      
+      // Log the parsed URL for debugging
+      console.log(`🔍 Original URL: ${audioUrl}`);
+      console.log(`🔍 Final URL: ${finalUrl}`);
+      console.log(`🔍 Host: ${parsedUrl.host}`);
+      console.log(`🔍 Pathname: ${parsedUrl.pathname}`);
+      console.log(`🔍 Search params: ${parsedUrl.search}`);
+      
     } catch (error) {
+      console.error('URL parsing error:', error);
       return new Response(JSON.stringify({ 
-        error: 'Invalid URL provided' 
+        error: 'Invalid URL provided',
+        details: error.message,
+        provided_url: audioUrl
       }), { status: 400 });
     }
     
     // Extract filename from URL if not provided
     const extractedFilename = filename || parsedUrl.pathname.split('/').pop() || 'audio.mp3';
     
-    console.log(`🌐 Fetching audio from: ${audioUrl}`);
+    console.log(`🌐 Fetching audio from: ${finalUrl}`);
     
-    // Fetch the file
-    const response = await fetch(audioUrl, {
-      headers: {
-        'User-Agent': 'Groq-Whisper-XL/1.0'
+    // Fetch the file with better error handling and headers
+    let response;
+    try {
+      // Use the properly parsed URL
+      response = await fetch(finalUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; Groq-Whisper-XL/1.0)',
+          'Accept': 'audio/*, video/*, */*',
+          'Accept-Encoding': 'identity'
+        },
+        redirect: 'follow',
+        // Add timeout to prevent hanging
+        signal: AbortSignal.timeout(30000) // 30 second timeout
+      });
+    } catch (fetchError) {
+      console.error('Fetch error:', fetchError);
+      
+      // Provide more specific error messages
+      let errorDetails = fetchError.message;
+      if (fetchError.name === 'AbortError') {
+        errorDetails = 'Request timed out after 30 seconds';
+      } else if (fetchError.name === 'TypeError') {
+        errorDetails = 'Network error or invalid URL';
       }
-    });
-    
-    if (!response.ok) {
+      
       return new Response(JSON.stringify({ 
         error: 'Failed to fetch audio from URL',
-        status: response.status,
-        statusText: response.statusText
+        details: errorDetails,
+        error_type: fetchError.name,
+        url: finalUrl,
+        original_url: audioUrl
       }), { status: 400 });
+    }
+    
+    if (!response.ok) {
+      console.error(`HTTP ${response.status}: ${response.statusText}`);
+              return new Response(JSON.stringify({ 
+          error: 'Failed to fetch audio from URL',
+          status: response.status,
+          statusText: response.statusText,
+          url: finalUrl,
+          original_url: audioUrl,
+          headers: Object.fromEntries(response.headers.entries())
+        }), { status: 400 });
     }
     
     // Check content type

@@ -109,8 +109,15 @@ Now that the worker exists, you can set environment variables using **three meth
      ```
      GROQ_API_KEY = your_groq_api_key_here
      ALLOWED_ORIGINS = https://yourdomain.com,http://localhost:3000
+     
+     # R2 Credentials (Required for file storage)
+     # Get these from: Cloudflare Dashboard → R2 → Manage R2 API tokens
+     R2_ACCOUNT_ID = your_cloudflare_account_id_here
+     R2_ACCESS_KEY_ID = your_r2_access_key_id_here
+     R2_SECRET_ACCESS_KEY = your_r2_secret_access_key_here
      ```
-   - Click **"Encrypt"** for sensitive variables like API keys
+   - Click **"Encrypt"** for sensitive variables like API keys and `R2_SECRET_ACCESS_KEY`
+   - Leave `R2_ACCOUNT_ID` and `R2_ACCESS_KEY_ID` as plain text
    - Click **"Save and deploy"**
 
 #### Option 2: Wrangler CLI (Recommended for Development)
@@ -123,9 +130,17 @@ wrangler secret put GROQ_API_KEY
 wrangler secret put ALLOWED_ORIGINS
 # Enter your origins when prompted
 
+# Set R2 credentials (Required for file storage)
+wrangler secret put R2_ACCOUNT_ID
+wrangler secret put R2_ACCESS_KEY_ID
+wrangler secret put R2_SECRET_ACCESS_KEY
+
 # Or set multiple at once
 echo "your_groq_api_key_here" | wrangler secret put GROQ_API_KEY
 echo "https://yourdomain.com,http://localhost:3000" | wrangler secret put ALLOWED_ORIGINS
+echo "your_cloudflare_account_id" | wrangler secret put R2_ACCOUNT_ID
+echo "your_r2_access_key_id" | wrangler secret put R2_ACCESS_KEY_ID
+echo "your_r2_secret_access_key" | wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
 #### Option 3: Local Development (.dev.vars file)
@@ -137,6 +152,11 @@ Create a `.dev.vars` file in your project root for local development:
 cat > .dev.vars << EOF
 GROQ_API_KEY=your_groq_api_key_here
 ALLOWED_ORIGINS=https://yourdomain.com,http://localhost:3000
+
+# R2 Credentials (Required for file storage)
+R2_ACCOUNT_ID=your_cloudflare_account_id_here
+R2_ACCESS_KEY_ID=your_r2_access_key_id_here
+R2_SECRET_ACCESS_KEY=your_r2_secret_access_key_here
 EOF
 ```
 
@@ -200,6 +220,9 @@ wrangler queues create groq-processing-dlq
 # 6. Set environment variables
 wrangler secret put GROQ_API_KEY
 wrangler secret put ALLOWED_ORIGINS
+wrangler secret put R2_ACCOUNT_ID
+wrangler secret put R2_ACCESS_KEY_ID
+wrangler secret put R2_SECRET_ACCESS_KEY
 
 # 6. Final deployment
 wrangler deploy
@@ -524,9 +547,279 @@ curl -X POST http://localhost:8787/delete-job \
 | `/delete-job` | POST | Delete a job and its associated files |
 | `/process` | POST | Manual processing trigger (dev only) |
 
+## 🖥️ Command Line Interface (CLI)
+
+Groq Whisper XL includes a powerful CLI tool for easy transcription from the command line.
+
+### 🚀 CLI Setup
+
+The CLI is automatically installed with the project and uses environment variables for configuration:
+
+```bash
+# Install dependencies (includes CLI)
+npm install
+
+# Configure CLI endpoints
+cp .env.example .env
+# Edit .env with your production worker URL
+```
+
+**Environment Configuration (`.env`):**
+```bash
+# Your deployed Cloudflare Worker URL
+PRODUCTION_URL=https://your-worker-name.your-subdomain.workers.dev
+
+# Local development endpoint
+LOCAL_URL=http://localhost:8787
+```
+
+### 🎯 CLI Features
+
+- 🚀 **Ultra-fast transcription** using your Groq Whisper XL worker
+- 📁 **Universal file support** (MB to 100GB+ files)
+- 🎯 **Smart tier detection** (Standard/Advanced/Enterprise)
+- 🤖 **LLM error correction** for improved accuracy
+- 🌐 **URL-based audio processing**
+- 📊 **Real-time progress tracking**
+- 🔧 **Multiple upload methods** (Direct, URL, Presigned)
+- 📋 **Complete job management**
+
+### 🎬 Quick Start
+
+```bash
+# Run the CLI
+npm run cli
+# or directly:
+node cli.js
+```
+
+### 📤 Upload Methods
+
+The CLI supports all three upload methods with an intuitive menu interface:
+
+#### 1. Direct Upload (Recommended)
+- **Best for**: Most use cases, simple file uploads
+- **Process**: Single-step upload with immediate processing
+- **File size**: Any size (automatically handles chunking)
+
+#### 2. URL Upload
+- **Best for**: Processing audio from web URLs, podcasts
+- **Process**: Download and process files from any public URL
+- **Formats**: Any supported audio/video format
+
+#### 3. Presigned Upload (Advanced)
+- **Best for**: Large files, custom upload workflows
+- **Process**: Two-step process for maximum control
+- **Features**: Progress monitoring, advanced error handling
+
+### 🎮 CLI Interface
+
+The CLI provides a beautiful, interactive menu system:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║                    🎤 Groq Whisper XL CLI                   ║
+║              Universal Audio Transcription Tool             ║
+╚══════════════════════════════════════════════════════════════╝
+
+✨ Features:
+• 🚀 Ultra-fast transcription using Groq's Whisper API
+• 📁 Universal file support (MB to 100GB+)
+• 🎯 Smart tier detection (Standard/Advanced/Enterprise)
+• 🤖 LLM error correction for improved accuracy
+• 🌐 URL-based audio processing
+• 📊 Real-time progress tracking
+
+┌─────────────────────────────────────────────────────────────┐
+│                        Main Menu                            │
+├─────────────────────────────────────────────────────────────┤
+│ Upload Methods:                                             │
+│   1. 📤 Direct Upload (Recommended)                         │
+│   2. 🌐 URL Upload (From web)                               │
+│   3. 🔧 Presigned Upload (Advanced)                         │
+│                                                             │
+│ Job Management:                                             │
+│   4. 📋 List Jobs                                           │
+│   5. 📊 Check Job Status                                    │
+│   6. 📄 Get Job Results                                     │
+│   7. 🗑️  Delete Job                                          │
+│                                                             │
+│ Settings:                                                   │
+│   8. ⚙️  Change Endpoint                                     │
+│   9. ❓ Help & Examples                                     │
+│   0. 🚪 Exit                                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 📋 CLI Examples
+
+#### Direct Upload Example
+```bash
+# Start CLI
+npm run cli
+
+# Choose option 1 (Direct Upload)
+# Enter file path: ./my-audio.mp3
+# Enable LLM correction? y
+# Webhook URL: (optional)
+
+# Output:
+✅ Upload successful!
+📋 Job ID: 4b1a372f-d1d7-4ff3-9d02-148ae4a775d9
+📁 Filename: my-audio.mp3
+📊 File size: 45.2 MB
+⚙️  Processing method: chunked
+
+📊 Monitoring job: 4b1a372f-d1d7-4ff3-9d02-148ae4a775d9
+⚙️ Status: PROCESSING | Progress: [████████░░] 67% | Elapsed: 2m 15s
+
+🎉 Processing completed successfully!
+
+📝 Final Transcript:
+────────────────────────────────────────
+Hello, this is my audio recording with improved 
+punctuation and formatting thanks to LLM correction.
+────────────────────────────────────────
+
+Save transcript to file? y
+Enter filename: transcript.txt
+✅ Transcript saved to: transcript.txt
+```
+
+#### URL Upload Example
+```bash
+# Choose option 2 (URL Upload)
+# Enter audio URL: https://example.com/podcast.mp3
+# Custom filename: (optional)
+# Enable LLM correction? y
+
+# Output:
+✅ Download and upload successful!
+📋 Job ID: 9385a28f-ccf8-4287-8949-72d2cbc9139c
+📁 Filename: podcast.mp3
+🌐 Source URL: https://example.com/podcast.mp3
+📊 File size: 236.8 MB
+⚙️  Processing method: chunked
+```
+
+#### Job Management Example
+```bash
+# Choose option 4 (List Jobs)
+# Number of jobs to show: 10
+# Filter by status: done
+
+📊 Showing 3 of 15 jobs:
+
+┌─────────────────────────────────────┬──────────────────┬───────────┬──────────┬──────────────┬─────────────────────┐
+│ Job ID                              │ Filename         │ Status    │ Progress │ File Size    │ Created             │
+├─────────────────────────────────────┼──────────────────┼───────────┼──────────┼──────────────┼─────────────────────┤
+│ 4b1a372f-d1d7-4ff3-9d02-148ae4a775 │ my-audio.mp3     │ done      │    100% │ 45.2 MB      │ 2024-01-15 10:30:00 │
+│ 9385a28f-ccf8-4287-8949-72d2cbc913 │ podcast.mp3      │ done      │    100% │ 236.8 MB     │ 2024-01-15 09:15:22 │
+│ a4e253a3-6132-4c14-8b0b-5ecd7159ac │ example.wav      │ done      │    100% │ 4.5 KB       │ 2024-01-15 08:45:10 │
+└─────────────────────────────────────┴──────────────────┴───────────┴──────────┴──────────────┴─────────────────────┘
+```
+
+### ⚙️ Endpoint Management
+
+The CLI can easily switch between local development and production endpoints:
+
+```bash
+# Choose option 8 (Change Endpoint)
+
+🔧 Change Endpoint
+
+Current endpoint: http://localhost:8787
+
+Options:
+1. Local development (http://localhost:8787)
+2. Production (https://your-worker-name.your-subdomain.workers.dev)
+3. Custom URL
+
+Choose option (1-3): 2
+✅ Endpoint set to: https://your-worker-name.your-subdomain.workers.dev
+```
+
+### 📊 Processing Tiers (CLI Detection)
+
+The CLI automatically detects and displays the processing tier:
+
+```
+📁 File: large-audio.wav
+📊 Size: 236.8 MB
+🎯 Processing tier: Enterprise
+
+⚙️  Processing method: chunked
+📊 Monitoring job: 9385a28f-ccf8-4287-8949-72d2cbc9139c
+⚙️ Status: PROCESSING | Progress: [██████░░░░] 60% | Elapsed: 5m 32s
+```
+
+| Tier | File Size | CLI Display | Features |
+|------|-----------|-------------|----------|
+| **Standard** | ≤ 15MB | `🎯 Processing tier: Standard` | Direct processing, fastest |
+| **Advanced** | 15MB-100MB | `🎯 Processing tier: Advanced` | Chunking, progress tracking |
+| **Enterprise** | > 100MB | `🎯 Processing tier: Enterprise` | Advanced chunking, monitoring |
+
+### 🔧 CLI Configuration
+
+#### Environment Variables
+The CLI uses `.env` for configuration:
+
+```bash
+# .env file
+PRODUCTION_URL=https://your-worker-name.your-subdomain.workers.dev
+LOCAL_URL=http://localhost:8787
+```
+
+#### Package.json Script
+```json
+{
+  "scripts": {
+    "cli": "node cli.js"
+  },
+  "bin": {
+    "groq-whisper": "./cli.js"
+  }
+}
+```
+
+#### Global Installation (Optional)
+```bash
+# Install globally to use 'groq-whisper' command anywhere
+npm install -g .
+
+# Now you can use:
+groq-whisper
+```
+
+### 💡 CLI Pro Tips
+
+1. **Large Files**: Enable LLM correction for better transcript quality
+2. **Monitoring**: The CLI automatically monitors progress for large files
+3. **Job IDs**: Save job IDs to retrieve results later
+4. **Webhooks**: Set up webhook URLs for completion notifications
+5. **Batch Processing**: Use the CLI in scripts for automated transcription
+6. **Error Recovery**: The CLI handles network interruptions gracefully
+
+### 🚀 Scripting with CLI
+
+For automated workflows, you can also use the CLI programmatically:
+
+```bash
+#!/bin/bash
+# Batch transcription script
+
+for file in *.mp3; do
+    echo "Processing: $file"
+    # Use the API directly or extend the CLI for batch mode
+    curl -X POST http://localhost:8787/upload \
+        -F "file=@$file" \
+        -F "use_llm=true"
+done
+```
+
 ## 🖥️ Web Interface
 
-**Note:** Web interface is not implemented in the current version. Use the API endpoints directly for transcription.
+**Note:** Web interface is not implemented in the current version. Use the CLI or API endpoints directly for transcription.
 
 ## 🏗️ Architecture
 
@@ -598,6 +891,12 @@ Merged Results
 #### Required Variables
 ```bash
 GROQ_API_KEY=your_groq_api_key    # Get from https://console.groq.com/keys
+
+# R2 Credentials (Required for file storage)
+# Get these from: Cloudflare Dashboard → R2 → Manage R2 API tokens
+R2_ACCOUNT_ID=your_cloudflare_account_id_here
+R2_ACCESS_KEY_ID=your_r2_access_key_id_here
+R2_SECRET_ACCESS_KEY=your_r2_secret_access_key_here
 ```
 
 #### Optional Variables
@@ -660,6 +959,22 @@ echo "ALLOWED_ORIGINS=http://localhost:3000" >> .dev.vars
    # Set for specific environment
    wrangler secret put GROQ_API_KEY --env production
    wrangler secret put GROQ_API_KEY --env development
+   ```
+
+4. **R2 credentials error ("Resolved credential object is not valid"):**
+   ```bash
+   # Check if R2 credentials are set
+   wrangler secret list
+   
+   # Set missing R2 credentials
+   wrangler secret put R2_ACCOUNT_ID
+   wrangler secret put R2_ACCESS_KEY_ID
+   wrangler secret put R2_SECRET_ACCESS_KEY
+   
+   # Test the endpoint after setting credentials
+   curl -X POST https://your-worker-url.workers.dev/upload-url \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://example.com/test.mp3"}'
    ```
 
 ### Supported Audio Formats

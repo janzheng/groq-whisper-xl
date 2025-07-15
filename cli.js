@@ -14,6 +14,153 @@ config();
 const DEFAULT_BASE_URL = process.env.LOCAL_URL || 'http://localhost:8787';
 const PRODUCTION_URL = process.env.PRODUCTION_URL || 'https://your-worker-name.your-subdomain.workers.dev';
 
+class LoadingIndicator {
+  constructor() {
+    this.spinners = {
+      dots: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+      bounce: ['⠁', '⠂', '⠄', '⡀', '⢀', '⠠', '⠐', '⠈'],
+      pulse: ['◐', '◓', '◑', '◒'],
+      clock: ['🕐', '🕑', '🕒', '🕓', '🕔', '🕕', '🕖', '🕗', '🕘', '🕙', '🕚', '🕛'],
+      wave: ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▇', '▆', '▅', '▄', '▃', '▁'],
+      arrow: ['←', '↖', '↑', '↗', '→', '↘', '↓', '↙'],
+      box: ['▖', '▘', '▝', '▗'],
+      star: ['✦', '✧', '✩', '✪', '✫', '✬', '✭', '✮', '✯', '✰'],
+      earth: ['🌍', '🌎', '🌏'],
+      moon: ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘']
+    };
+    this.currentSpinner = null;
+    this.currentInterval = null;
+    this.currentFrame = 0;
+    this.isActive = false;
+  }
+
+  start(message, type = 'dots', color = '\x1b[36m') {
+    if (this.isActive) {
+      this.stop();
+    }
+
+    this.isActive = true;
+    this.currentFrame = 0;
+    const frames = this.spinners[type] || this.spinners.dots;
+    
+    // Hide cursor
+    process.stdout.write('\x1b[?25l');
+    
+    this.currentInterval = setInterval(() => {
+      const frame = frames[this.currentFrame % frames.length];
+      process.stdout.write(`\r${color}${frame}\x1b[0m ${message}`);
+      this.currentFrame++;
+    }, 100);
+
+    return this;
+  }
+
+  stop(finalMessage = null, symbol = '✅') {
+    if (this.currentInterval) {
+      clearInterval(this.currentInterval);
+      this.currentInterval = null;
+    }
+    
+    if (this.isActive) {
+      // Clear the line and show cursor
+      process.stdout.write('\r' + ' '.repeat(100) + '\r');
+      process.stdout.write('\x1b[?25h');
+      
+      if (finalMessage) {
+        console.log(`${symbol} ${finalMessage}`);
+      }
+    }
+    
+    this.isActive = false;
+    return this;
+  }
+
+  update(message) {
+    if (this.isActive) {
+      // The message will be updated on the next frame
+      this.currentMessage = message;
+    }
+    return this;
+  }
+
+  static async withSpinner(message, asyncFn, type = 'dots') {
+    const loader = new LoadingIndicator();
+    loader.start(message, type);
+    
+    try {
+      const result = await asyncFn();
+      loader.stop();
+      return result;
+    } catch (error) {
+      loader.stop(null, '❌');
+      throw error;
+    }
+  }
+}
+
+class ProgressBar {
+  constructor(total, width = 40) {
+    this.total = total;
+    this.current = 0;
+    this.width = width;
+    this.startTime = Date.now();
+  }
+
+  update(current, message = '') {
+    this.current = current;
+    const percentage = Math.min(100, Math.max(0, (current / this.total) * 100));
+    const filled = Math.round((percentage / 100) * this.width);
+    const empty = this.width - filled;
+    
+    const elapsed = Date.now() - this.startTime;
+    const rate = current / (elapsed / 1000);
+    const eta = current > 0 ? ((this.total - current) / rate) : 0;
+    
+    const bar = '█'.repeat(filled) + '░'.repeat(empty);
+    const stats = `${percentage.toFixed(1)}%`;
+    const speed = rate > 0 ? ` | ${rate.toFixed(1)}/s` : '';
+    const timeLeft = eta > 0 && eta < 3600 ? ` | ETA: ${Math.round(eta)}s` : '';
+    
+    const line = `\r[${bar}] ${stats}${speed}${timeLeft} ${message}`;
+    process.stdout.write(line);
+    
+    return percentage >= 100;
+  }
+
+  finish(message = 'Complete!') {
+    this.update(this.total, message);
+    console.log(); // New line
+  }
+}
+
+class AnimatedText {
+  static typewriter(text, speed = 50) {
+    return new Promise((resolve) => {
+      let i = 0;
+      const interval = setInterval(() => {
+        process.stdout.write(text[i]);
+        i++;
+        if (i >= text.length) {
+          clearInterval(interval);
+          console.log(); // New line
+          resolve();
+        }
+      }, speed);
+    });
+  }
+
+  static rainbow(text) {
+    const colors = ['\x1b[31m', '\x1b[33m', '\x1b[32m', '\x1b[36m', '\x1b[34m', '\x1b[35m'];
+    return text.split('').map((char, i) => 
+      `${colors[i % colors.length]}${char}\x1b[0m`
+    ).join('');
+  }
+
+  static glow(text) {
+    return `\x1b[1m\x1b[93m${text}\x1b[0m`;
+  }
+}
+
 class GroqWhisperCLI {
   constructor() {
     this.baseUrl = DEFAULT_BASE_URL;
@@ -56,13 +203,24 @@ class GroqWhisperCLI {
   }
 
   async showWelcome() {
-    console.log(`
+    console.clear();
+    
+    // Animated welcome
+    const title = `
 ╔══════════════════════════════════════════════════════════════╗
 ║                    🎤 Groq Whisper XL CLI                   ║
 ║              Universal Audio Transcription Tool             ║
-╚══════════════════════════════════════════════════════════════╝
+╚══════════════════════════════════════════════════════════════╝`;
 
-✨ Features:
+    console.log(AnimatedText.glow(title));
+    
+    const loader = new LoadingIndicator();
+    loader.start('🚀 Initializing system...', 'star', '\x1b[35m');
+    await this.sleep(800);
+    loader.stop();
+
+    console.log(`
+${AnimatedText.rainbow('✨ Features:')}
 • 🚀 Ultra-fast transcription using Groq's Whisper API
 • 📁 Universal file support (MB to 100GB+)
 • 🎯 Smart tier detection (Standard/Advanced/Enterprise)
@@ -70,7 +228,7 @@ class GroqWhisperCLI {
 • 🌐 URL-based audio processing
 • 📊 Real-time progress tracking
 
-Current endpoint: ${this.baseUrl}
+Current endpoint: ${AnimatedText.glow(this.baseUrl)}
 `);
   }
 
@@ -193,13 +351,16 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     console.log(`📁 File: ${filename}`);
     console.log(`📊 Size: ${this.formatBytes(fileSize)}`);
     console.log(`🎯 Processing tier: ${fileSize <= 15 * 1024 * 1024 ? 'Standard' : fileSize <= 100 * 1024 * 1024 ? 'Advanced' : 'Enterprise'}`);
-
-    const useLLM = await this.question('\nEnable LLM correction for better quality? (y/N): ');
+    const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
-    console.log('\n🚀 Uploading and processing...');
-
+    const loader = new LoadingIndicator();
+    
     try {
+      // Start upload animation
+      loader.start('🚀 Preparing upload...', 'wave', '\x1b[33m');
+      await this.sleep(500);
+      
       // Create FormData equivalent
       const fileBuffer = readFileSync(filePath);
       const formData = new FormData();
@@ -215,12 +376,16 @@ Video: MP4, MPEG, WEBM (audio track extracted)
         formData.append('webhook_url', webhookUrl.trim());
       }
 
+      loader.stop();
+      loader.start('📤 Uploading file to server...', 'dots', '\x1b[36m');
+
       const response = await fetch(`${this.baseUrl}/upload`, {
         method: 'POST',
         body: formData
       });
 
       const result = await response.json();
+      loader.stop();
 
       if (!response.ok) {
         console.log(`❌ Upload failed: ${result.error || 'Unknown error'}`);
@@ -237,6 +402,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       await this.monitorJob(result.job_id, true);
 
     } catch (error) {
+      loader.stop();
       console.log(`❌ Error: ${error.message}`);
     }
   }
@@ -251,10 +417,10 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     }
 
     const filename = await this.question('Custom filename (optional, press Enter to auto-detect): ');
-    const useLLM = await this.question('Enable LLM correction for better quality? (y/N): ');
+    const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
-    console.log('\n🌐 Downloading and processing...');
+    const loader = new LoadingIndicator();
 
     try {
       const payload = {
@@ -270,16 +436,49 @@ Video: MP4, MPEG, WEBM (audio track extracted)
         payload.webhook_url = webhookUrl.trim();
       }
 
+      loader.start('🔗 Connecting to server...', 'pulse', '\x1b[35m');
+      console.log(`\n🔗 Connecting to: ${this.baseUrl}/upload-url`);
+      console.log(`📤 Payload:`, JSON.stringify(payload, null, 2));
+      
+      loader.stop();
+      loader.start('🌐 Downloading and processing file...', 'earth', '\x1b[32m');
+
       const response = await fetch(`${this.baseUrl}/upload-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      const result = await response.json();
+      loader.stop();
+      console.log(`📡 Response status: ${response.status} ${response.statusText}`);
+      
+      let result;
+      try {
+        result = await response.json();
+      } catch (jsonError) {
+        console.log(`❌ Failed to parse JSON response: ${jsonError.message}`);
+        const textResponse = await response.text();
+        console.log(`📄 Raw response: ${textResponse}`);
+        return;
+      }
 
       if (!response.ok) {
         console.log(`❌ Upload failed: ${result.error || 'Unknown error'}`);
+        if (result.details) {
+          console.log(`   Details: ${result.details}`);
+        }
+        if (result.status && result.statusText) {
+          console.log(`   HTTP Status: ${result.status} ${result.statusText}`);
+        }
+        if (result.url) {
+          console.log(`   URL: ${result.url}`);
+        }
+        if (result.original_url && result.original_url !== result.url) {
+          console.log(`   Original URL: ${result.original_url}`);
+        }
+        if (result.error_type) {
+          console.log(`   Error Type: ${result.error_type}`);
+        }
         return;
       }
 
@@ -294,7 +493,23 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       await this.monitorJob(result.job_id, true);
 
     } catch (error) {
+      loader.stop();
       console.log(`❌ Error: ${error.message}`);
+      console.log(`🔍 Error type: ${error.name}`);
+      console.log(`🔍 Error stack: ${error.stack}`);
+      
+      if (error.cause) {
+        console.log(`🔍 Error cause: ${error.cause}`);
+      }
+      
+      // Check if it's a network connectivity issue
+      if (error.message.includes('fetch failed') || error.message.includes('ECONNREFUSED')) {
+        console.log(`\n💡 This looks like a connectivity issue. Please check:`);
+        console.log(`   1. Is your worker running? Try: npm run dev`);
+        console.log(`   2. Is the endpoint correct? Current: ${this.baseUrl}`);
+        console.log(`   3. Are you connected to the internet?`);
+        console.log(`   4. Try testing with: curl ${this.baseUrl}/upload-url`);
+      }
     }
   }
 
@@ -315,12 +530,14 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     console.log(`📁 File: ${filename}`);
     console.log(`📊 Size: ${this.formatBytes(fileSize)}`);
 
-    const useLLM = await this.question('\nEnable LLM correction for better quality? (y/N): ');
+    const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
     try {
+      const loader = new LoadingIndicator();
+
       // Step 1: Get presigned URL
-      console.log('\n🔗 Step 1: Getting presigned URL...');
+      loader.start('🔗 Step 1: Getting presigned URL...', 'arrow', '\x1b[33m');
       
       const payload = {
         filename,
@@ -341,15 +558,16 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       const presignResult = await presignResponse.json();
 
       if (!presignResponse.ok) {
+        loader.stop();
         console.log(`❌ Failed to get presigned URL: ${presignResult.error || 'Unknown error'}`);
         return;
       }
 
-      console.log(`✅ Presigned URL obtained`);
+      loader.stop('✅ Presigned URL obtained');
       console.log(`📋 Job ID: ${presignResult.job_id}`);
 
       // Step 2: Upload file
-      console.log('\n📤 Step 2: Uploading file...');
+      loader.start('📤 Step 2: Uploading file to cloud storage...', 'wave', '\x1b[36m');
       
       const fileBuffer = readFileSync(filePath);
       
@@ -362,14 +580,15 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       });
 
       if (!uploadResponse.ok) {
+        loader.stop();
         console.log(`❌ File upload failed: ${uploadResponse.statusText}`);
         return;
       }
 
-      console.log('✅ File uploaded successfully');
+      loader.stop('✅ File uploaded successfully');
 
       // Step 3: Start processing
-      console.log('\n⚙️  Step 3: Starting processing...');
+      loader.start('⚙️  Step 3: Starting transcription processing...', 'star', '\x1b[32m');
       
       const startResponse = await fetch(`${this.baseUrl}/start`, {
         method: 'POST',
@@ -380,11 +599,12 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       const startResult = await startResponse.json();
 
       if (!startResponse.ok) {
+        loader.stop();
         console.log(`❌ Failed to start processing: ${startResult.error || 'Unknown error'}`);
         return;
       }
 
-      console.log('✅ Processing started');
+      loader.stop('✅ Processing started');
       console.log(`📊 File size: ${this.formatBytes(startResult.file_size)}`);
       console.log(`⚙️  Processing method: ${startResult.processing_method}`);
 
@@ -397,11 +617,12 @@ Video: MP4, MPEG, WEBM (audio track extracted)
   }
 
   async monitorJob(jobId, autoShowResults = false) {
-    console.log(`\n📊 Monitoring job: ${jobId}`);
+    console.log(`\n📊 ${AnimatedText.glow('Monitoring job:')} ${jobId}`);
     console.log('Press Ctrl+C to stop monitoring (job will continue in background)\n');
 
     const startTime = Date.now();
     let lastStatus = '';
+    let spinner = null;
 
     while (true) {
       try {
@@ -409,27 +630,51 @@ Video: MP4, MPEG, WEBM (audio track extracted)
         const status = await response.json();
 
         if (!response.ok) {
+          if (spinner) spinner.stop();
           console.log(`❌ Error checking status: ${status.error || 'Unknown error'}`);
           break;
         }
 
         const elapsed = this.formatDuration(Date.now() - startTime);
-        const statusEmoji = {
-          'uploaded': '📁',
-          'processing': '⚙️',
-          'done': '✅',
-          'failed': '❌'
-        }[status.status] || '🔄';
+        const progress = status.progress || 0;
+        
+        // Use different spinner types based on status
+        const spinnerType = {
+          'uploaded': 'pulse',
+          'processing': 'dots',
+          'done': 'star',
+          'failed': 'box'
+        }[status.status] || 'dots';
 
-        const progressBar = this.createProgressBar(status.progress || 0);
-        const statusLine = `${statusEmoji} Status: ${status.status.toUpperCase()} | Progress: ${progressBar} ${status.progress || 0}% | Elapsed: ${elapsed}`;
+        const statusColors = {
+          'uploaded': '\x1b[33m',  // Yellow
+          'processing': '\x1b[36m', // Cyan
+          'done': '\x1b[32m',      // Green
+          'failed': '\x1b[31m'     // Red
+        };
 
-        // Clear line and write new status
-        process.stdout.write('\r' + ' '.repeat(100) + '\r');
-        process.stdout.write(statusLine);
+        // If status changed, restart spinner
+        if (status.status !== lastStatus) {
+          if (spinner) spinner.stop();
+          
+          if (status.status === 'processing') {
+            spinner = new LoadingIndicator();
+            spinner.start(`🔄 Processing... ${progress}% | Elapsed: ${elapsed}`, spinnerType, statusColors[status.status]);
+          } else if (status.status === 'uploaded') {
+            spinner = new LoadingIndicator();
+            spinner.start(`📁 File uploaded, waiting to start... | Elapsed: ${elapsed}`, spinnerType, statusColors[status.status]);
+          }
+        } else if (spinner && status.status === 'processing') {
+          // Update the spinner message with current progress
+          spinner.stop();
+          spinner.start(`🔄 Processing... ${progress}% | Elapsed: ${elapsed}`, spinnerType, statusColors[status.status]);
+        }
 
         if (status.status === 'done') {
-          console.log('\n\n🎉 Processing completed successfully!');
+          if (spinner) spinner.stop();
+          
+          // Show completion animation
+          console.log('\n🎉 ' + AnimatedText.rainbow('Processing completed successfully!'));
           
           if (autoShowResults) {
             await this.getJobResults(jobId);
@@ -438,14 +683,16 @@ Video: MP4, MPEG, WEBM (audio track extracted)
           }
           break;
         } else if (status.status === 'failed') {
+          if (spinner) spinner.stop();
           console.log(`\n\n❌ Processing failed: ${status.error || 'Unknown error'}`);
           break;
         }
 
         lastStatus = status.status;
-        await this.sleep(2000); // Check every 2 seconds
+        await this.sleep(1000); // Check every second for more responsive updates
 
       } catch (error) {
+        if (spinner) spinner.stop();
         console.log(`\n❌ Error monitoring job: ${error.message}`);
         break;
       }
@@ -482,8 +729,13 @@ Video: MP4, MPEG, WEBM (audio track extracted)
         url += '?' + params.toString();
       }
 
+      const loader = new LoadingIndicator();
+      loader.start('📋 Fetching job list...', 'dots', '\x1b[36m');
+
       const response = await fetch(url);
       const result = await response.json();
+      
+      loader.stop();
 
       if (!response.ok) {
         console.log(`❌ Error: ${result.error || 'Unknown error'}`);
@@ -520,6 +772,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       }
 
     } catch (error) {
+      if (typeof loader !== 'undefined') loader.stop();
       console.log(`❌ Error: ${error.message}`);
     }
   }
@@ -548,8 +801,13 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     }
 
     try {
+      const loader = new LoadingIndicator();
+      loader.start('📄 Fetching transcription results...', 'wave', '\x1b[32m');
+      
       const response = await fetch(`${this.baseUrl}/result?job_id=${jobId}`);
       const result = await response.json();
+      
+      loader.stop();
 
       if (!response.ok) {
         if (result.error === 'Not ready') {
@@ -579,7 +837,14 @@ Video: MP4, MPEG, WEBM (audio track extracted)
         for (let i = 0; i < result.partials.length; i++) {
           const partial = result.partials[i];
           console.log(`\nChunk ${i + 1}:`);
-          console.log(`  Text: ${partial.text.substring(0, 100)}${partial.text.length > 100 ? '...' : ''}`);
+          
+          // Handle cases where text might be undefined/null (failed chunks)
+          if (partial.text) {
+            console.log(`  Text: ${partial.text.substring(0, 100)}${partial.text.length > 100 ? '...' : ''}`);
+          } else {
+            console.log(`  Text: [Chunk processing failed - no transcript available]`);
+          }
+          
           if (partial.segments && partial.segments.length > 0) {
             console.log(`  Segments: ${partial.segments.length}`);
             console.log(`  Duration: ${partial.segments[0].start}s - ${partial.segments[partial.segments.length - 1].end}s`);
@@ -603,6 +868,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       }
 
     } catch (error) {
+      if (typeof loader !== 'undefined') loader.stop();
       console.log(`❌ Error: ${error.message}`);
     }
   }
@@ -623,6 +889,9 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     }
 
     try {
+      const loader = new LoadingIndicator();
+      loader.start('🗑️ Deleting job and cleaning up files...', 'box', '\x1b[31m');
+      
       const response = await fetch(`${this.baseUrl}/delete-job`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -630,6 +899,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       });
 
       const result = await response.json();
+      loader.stop();
 
       if (!response.ok) {
         console.log(`❌ Error: ${result.error || 'Unknown error'}`);
@@ -644,6 +914,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       }
 
     } catch (error) {
+      if (typeof loader !== 'undefined') loader.stop();
       console.log(`❌ Error: ${error.message}`);
     }
   }
