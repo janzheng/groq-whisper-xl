@@ -254,8 +254,8 @@ class GroqWhisperCLI {
     // Animated welcome
     const title = `
 ╔══════════════════════════════════════════════════════════════╗
-║                    🎤 Groq Whisper XL CLI                   ║
-║              Universal Audio Transcription Tool             ║
+║                    🎤 Groq Whisper XL CLI                    ║
+║              Universal Audio Transcription Tool              ║
 ╚══════════════════════════════════════════════════════════════╝`;
 
     console.log(AnimatedText.glow(title));
