@@ -202,6 +202,52 @@ class GroqWhisperCLI {
     }
   }
 
+  async pingEndpoint() {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+      
+      const response = await fetch(`${this.baseUrl}/health`, {
+        method: 'GET',
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        return { online: true, status: response.status, message: 'Endpoint is online' };
+      } else {
+        return { online: false, status: response.status, message: `Endpoint returned ${response.status}` };
+      }
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        return { online: false, status: 'timeout', message: 'Endpoint timeout (>5s)' };
+      } else if (error.message.includes('fetch failed') || error.message.includes('ECONNREFUSED')) {
+        return { online: false, status: 'connection_failed', message: 'Connection refused' };
+      } else {
+        return { online: false, status: 'error', message: error.message };
+      }
+    }
+  }
+
+  async checkConnectivityBeforeOperation() {
+    const loader = new LoadingIndicator();
+    loader.start('🔍 Checking server availability...', 'pulse', '\x1b[33m');
+    
+    const pingResult = await this.pingEndpoint();
+    loader.stop();
+    
+    if (!pingResult.online) {
+      console.log(`\n⚠️  Warning: Server appears to be offline (${pingResult.message})`);
+      const proceed = await this.question('Continue anyway? (y/N): ');
+      if (!proceed.toLowerCase().startsWith('y')) {
+        console.log('Operation cancelled. Use option 8 to change endpoint or option 10 to test connectivity.');
+        return false;
+      }
+    }
+    return true;
+  }
+
   async showWelcome() {
     console.clear();
     
@@ -219,6 +265,11 @@ class GroqWhisperCLI {
     await this.sleep(800);
     loader.stop();
 
+    // Check endpoint connectivity
+    loader.start('🌐 Checking endpoint connectivity...', 'pulse', '\x1b[36m');
+    const pingResult = await this.pingEndpoint();
+    loader.stop();
+
     console.log(`
 ${AnimatedText.rainbow('✨ Features:')}
 • 🚀 Ultra-fast transcription using Groq's Whisper API
@@ -228,8 +279,21 @@ ${AnimatedText.rainbow('✨ Features:')}
 • 🌐 URL-based audio processing
 • 📊 Real-time progress tracking
 
-Current endpoint: ${AnimatedText.glow(this.baseUrl)}
-`);
+Current endpoint: ${AnimatedText.glow(this.baseUrl)}`);
+
+    // Show connectivity status
+    if (pingResult.online) {
+      console.log(`🟢 Status: ${AnimatedText.glow('ONLINE')} - Ready for transcription`);
+    } else {
+      console.log(`🔴 Status: ${AnimatedText.rainbow('OFFLINE')} - ${pingResult.message}`);
+      console.log(`\n⚠️  Warning: The endpoint is not responding. Please check:`);
+      console.log(`   • Is your worker running? Try: npm run dev`);
+      console.log(`   • Is the endpoint URL correct?`);
+      console.log(`   • Are you connected to the internet?`);
+      console.log(`   • Try option 8 to change endpoint or option 10 to test connectivity`);
+    }
+    
+    console.log('');
   }
 
   async showMainMenu() {
@@ -251,11 +315,12 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}
 │ Settings:                                                   │
 │   8. ⚙️  Change Endpoint                                     │
 │   9. ❓ Help & Examples                                     │
+│  10. 🌐 Test Connectivity                                   │
 │   0. 🚪 Exit                                                │
 └─────────────────────────────────────────────────────────────┘
 `);
 
-    const choice = await this.question('Choose an option (0-9): ');
+    const choice = await this.question('Choose an option (0-10): ');
     return choice.trim();
   }
 
@@ -287,6 +352,61 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}
         break;
       default:
         console.log('❌ Invalid choice');
+    }
+  }
+
+  async testConnectivity() {
+    console.log(`\n🌐 Test Connectivity\n`);
+    console.log(`Testing endpoint: ${this.baseUrl}`);
+    
+    const loader = new LoadingIndicator();
+    loader.start('🔍 Testing connection...', 'dots', '\x1b[36m');
+    
+    const startTime = Date.now();
+    const pingResult = await this.pingEndpoint();
+    const responseTime = Date.now() - startTime;
+    
+    loader.stop();
+    
+    console.log(`\n📊 Test Results:`);
+    console.log(`─────────────────────────────────────────────────────────────`);
+    console.log(`🔗 Endpoint: ${this.baseUrl}`);
+    console.log(`⏱️  Response Time: ${responseTime}ms`);
+    
+    if (pingResult.online) {
+      console.log(`✅ Status: ${AnimatedText.glow('ONLINE')}`);
+      console.log(`📡 HTTP Status: ${pingResult.status}`);
+      console.log(`💬 Message: ${pingResult.message}`);
+      console.log(`\n🎉 Great! Your endpoint is working perfectly.`);
+    } else {
+      console.log(`❌ Status: ${AnimatedText.rainbow('OFFLINE')}`);
+      console.log(`📡 Error Type: ${pingResult.status}`);
+      console.log(`💬 Message: ${pingResult.message}`);
+      
+      console.log(`\n🔧 Troubleshooting Tips:`);
+      
+      if (pingResult.status === 'connection_failed') {
+        console.log(`   • Check if your worker is running: npm run dev`);
+        console.log(`   • Verify the endpoint URL is correct`);
+        console.log(`   • Ensure the port is not blocked by firewall`);
+      } else if (pingResult.status === 'timeout') {
+        console.log(`   • Server might be overloaded or slow`);
+        console.log(`   • Check your internet connection`);
+        console.log(`   • Try a different endpoint if available`);
+      } else if (typeof pingResult.status === 'number' && pingResult.status >= 400) {
+        console.log(`   • Server returned HTTP ${pingResult.status} error`);
+        console.log(`   • Check server logs for more details`);
+        console.log(`   • Verify the /health endpoint exists`);
+      } else {
+        console.log(`   • Unknown error occurred`);
+        console.log(`   • Check network connectivity`);
+        console.log(`   • Try changing endpoint (option 8)`);
+      }
+      
+      const retry = await this.question('\nTry a different endpoint? (Y/n): ');
+      if (retry.trim() === '' || retry.toLowerCase().startsWith('y')) {
+        await this.changeEndpoint();
+      }
     }
   }
 
@@ -323,7 +443,9 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}
    • Two-step process for maximum control
 
 💡 Pro Tips:
-• Enable LLM correction for better transcript quality
+• LLM correction is enabled by default for better transcript quality
+• Transcripts are automatically saved to file by default
+• Use option 10 to test server connectivity before uploads
 • Monitor progress for large files
 • Save job IDs to retrieve results later
 • Files are automatically cleaned up after 24 hours
@@ -354,6 +476,11 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
+    // Check connectivity before proceeding
+    if (!(await this.checkConnectivityBeforeOperation())) {
+      return;
+    }
+
     const loader = new LoadingIndicator();
     
     try {
@@ -370,7 +497,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       });
       
       formData.append('file', blob, filename);
-      formData.append('use_llm', useLLM.toLowerCase().startsWith('y') ? 'true' : 'false');
+      formData.append('use_llm', useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y') ? 'true' : 'false');
       
       if (webhookUrl.trim()) {
         formData.append('webhook_url', webhookUrl.trim());
@@ -420,12 +547,17 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
+    // Check connectivity before proceeding
+    if (!(await this.checkConnectivityBeforeOperation())) {
+      return;
+    }
+
     const loader = new LoadingIndicator();
 
     try {
       const payload = {
         url: url.trim(),
-        use_llm: useLLM.toLowerCase().startsWith('y'),
+        use_llm: useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y'),
       };
 
       if (filename.trim()) {
@@ -533,6 +665,11 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
+    // Check connectivity before proceeding
+    if (!(await this.checkConnectivityBeforeOperation())) {
+      return;
+    }
+
     try {
       const loader = new LoadingIndicator();
 
@@ -542,7 +679,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       const payload = {
         filename,
         size: fileSize,
-        use_llm: useLLM.toLowerCase().startsWith('y'),
+        use_llm: useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y'),
       };
 
       if (webhookUrl.trim()) {
@@ -853,8 +990,8 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       }
 
       // Ask to save results
-      const save = await this.question('\nSave transcript to file? (y/N): ');
-      if (save.toLowerCase().startsWith('y')) {
+      const save = await this.question('\nSave transcript to file? (Y/n): ');
+      if (save.trim() === '' || save.toLowerCase().startsWith('y')) {
         const filename = await this.question('Enter filename (default: transcript.txt): ');
         const outputFile = filename.trim() || 'transcript.txt';
         
@@ -969,6 +1106,9 @@ Video: MP4, MPEG, WEBM (audio track extracted)
             break;
           case '9':
             await this.showHelp();
+            break;
+          case '10':
+            await this.testConnectivity();
             break;
           case '0':
             console.log('\n👋 Goodbye!');

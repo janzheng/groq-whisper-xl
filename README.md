@@ -618,8 +618,8 @@ The CLI provides a beautiful, interactive menu system:
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║                    🎤 Groq Whisper XL CLI                   ║
-║              Universal Audio Transcription Tool             ║
+║                    🎤 Groq Whisper XL CLI                    ║
+║              Universal Audio Transcription Tool              ║
 ╚══════════════════════════════════════════════════════════════╝
 
 ✨ Features:
@@ -642,10 +642,10 @@ The CLI provides a beautiful, interactive menu system:
 │   4. 📋 List Jobs                                           │
 │   5. 📊 Check Job Status                                    │
 │   6. 📄 Get Job Results                                     │
-│   7. 🗑️  Delete Job                                          │
+│   7. 🗑️  Delete Job                                        │
 │                                                             │
 │ Settings:                                                   │
-│   8. ⚙️  Change Endpoint                                     │
+│   8. ⚙️  Change Endpoint                                   │
 │   9. ❓ Help & Examples                                     │
 │   0. 🚪 Exit                                                │
 └─────────────────────────────────────────────────────────────┘

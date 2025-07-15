@@ -30,6 +30,8 @@ export default {
       return handleDeleteJob(request, env);
     } else if (url.pathname === '/process' && request.method === 'POST') {
       return handleManualProcess(request, env);
+    } else if (url.pathname === '/health' && request.method === 'GET') {
+      return handleHealth(request, env);
     }
     
     return new Response('Not found', { status: 404 });
@@ -513,6 +515,83 @@ async function handleManualProcess(request, env) {
     return new Response('Processing initiated', { status: 200 });
   } catch (error) {
     return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+  }
+}
+
+/**
+ * Health check endpoint for monitoring and connectivity testing
+ * curl http://localhost:8787/health
+ */
+async function handleHealth(request, env) {
+  try {
+    // Basic health check - verify the service is running
+    const health = {
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      service: 'groq-whisper-xl',
+      version: '1.0.0',
+      uptime: Date.now(),
+      endpoints: {
+        upload: '/upload',
+        upload_url: '/upload-url',
+        presigned: '/get-presigned-url',
+        status: '/status',
+        result: '/result',
+        jobs: '/jobs',
+        delete: '/delete-job'
+      }
+    };
+
+    // Optional: Test KV connectivity if available
+    if (env.GROQ_JOBS_KV) {
+      try {
+        // Try a simple KV operation to verify connectivity
+        await env.GROQ_JOBS_KV.list({ limit: 1 });
+        health.kv_status = 'connected';
+      } catch (error) {
+        health.kv_status = 'error';
+        health.kv_error = error.message;
+      }
+    }
+
+    // Optional: Test R2 connectivity if available
+    if (env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY) {
+      try {
+        const s3Client = createS3Client(env);
+        const bucketName = env.R2_BUCKET_NAME || (env.ENVIRONMENT === 'development' ? 'groq-whisper-audio-preview' : 'groq-whisper-audio');
+        // Just test the client creation, don't actually make a request to avoid costs
+        health.r2_status = 'configured';
+        health.r2_bucket = bucketName;
+      } catch (error) {
+        health.r2_status = 'error';
+        health.r2_error = error.message;
+      }
+    }
+
+    // Test Groq API key presence (don't test actual API to avoid costs)
+    if (env.GROQ_API_KEY) {
+      health.groq_api = 'configured';
+    } else {
+      health.groq_api = 'missing';
+    }
+
+    return new Response(JSON.stringify(health, null, 2), {
+      status: 200,
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache'
+      }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      error: error.message
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 }
 
