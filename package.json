@@ -8,8 +8,9 @@
     "groq-whisper": "./cli.js"
   },
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "build": "node scripts/build-static.js",
+    "dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
     "tail": "wrangler tail",
     "cli": "node cli.js"
   },

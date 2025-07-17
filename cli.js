@@ -10,6 +10,147 @@ import { config } from 'dotenv';
 // Load environment variables
 config();
 
+// ============================================================================
+// UNIFIED LOGGING SYSTEM (CLI VERSION)
+// ============================================================================
+
+/**
+ * Standardized logging system for consistent output across CLI, Web, and API
+ * CLI version includes colored output and terminal-optimized formatting
+ */
+class UnifiedLogger {
+  static levels = {
+    DEBUG: 0,
+    INFO: 1,
+    WARN: 2,
+    ERROR: 3
+  };
+
+  static emojis = {
+    // Process states
+    start: '🚀',
+    processing: '🔄',
+    complete: '✅',
+    failed: '❌',
+    
+    // File operations
+    upload: '📤',
+    download: '📥',
+    file: '📁',
+    delete: '🗑️',
+    
+    // Audio/transcription
+    audio: '🎵',
+    transcribe: '🎤',
+    chunk: '🧩',
+    stream: '🌊',
+    llm: '🧠',
+    
+    // Network/API
+    api: '📡',
+    webhook: '🔗',
+    url: '🌐',
+    
+    // Status/info
+    info: 'ℹ️',
+    warning: '⚠️',
+    error: '❌',
+    debug: '🔍',
+    stats: '📊',
+    time: '⏱️',
+    progress: '📈'
+  };
+
+  static colors = {
+    reset: '\x1b[0m',
+    bright: '\x1b[1m',
+    red: '\x1b[31m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    blue: '\x1b[34m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m',
+    white: '\x1b[37m',
+    gray: '\x1b[90m'
+  };
+
+  constructor(context = 'CLI', level = UnifiedLogger.levels.INFO, useColors = true) {
+    this.context = context;
+    this.level = level;
+    this.useColors = useColors;
+  }
+
+  _colorize(text, color) {
+    if (!this.useColors) return text;
+    return `${UnifiedLogger.colors[color] || ''}${text}${UnifiedLogger.colors.reset}`;
+  }
+
+  _formatMessage(emoji, message, data = null) {
+    const timestamp = new Date().toLocaleTimeString();
+    const contextStr = this._colorize(`[${this.context}]`, 'gray');
+    const prefix = `${emoji} ${contextStr}`;
+    
+    if (data && Object.keys(data).length > 0) {
+      const dataStr = this._colorize(JSON.stringify(data), 'gray');
+      return `${prefix} ${message} ${dataStr}`;
+    }
+    return `${prefix} ${message}`;
+  }
+
+  debug(message, data = null) {
+    if (this.level <= UnifiedLogger.levels.DEBUG) {
+      const formatted = this._formatMessage(UnifiedLogger.emojis.debug, 
+        this._colorize(message, 'gray'), data);
+      console.log(formatted);
+    }
+  }
+
+  info(emoji, message, data = null) {
+    if (this.level <= UnifiedLogger.levels.INFO) {
+      const emojiSymbol = UnifiedLogger.emojis[emoji] || emoji;
+      const coloredMessage = this._colorize(message, 'white');
+      const formatted = this._formatMessage(emojiSymbol, coloredMessage, data);
+      console.log(formatted);
+    }
+  }
+
+  warn(message, data = null) {
+    if (this.level <= UnifiedLogger.levels.WARN) {
+      const coloredMessage = this._colorize(message, 'yellow');
+      const formatted = this._formatMessage(UnifiedLogger.emojis.warning, coloredMessage, data);
+      console.warn(formatted);
+    }
+  }
+
+  error(message, error = null, data = null) {
+    if (this.level <= UnifiedLogger.levels.ERROR) {
+      const errorData = error ? { 
+        message: error.message, 
+        stack: error.stack?.substring(0, 200),
+        ...data 
+      } : data;
+      const coloredMessage = this._colorize(message, 'red');
+      const formatted = this._formatMessage(UnifiedLogger.emojis.error, coloredMessage, errorData);
+      console.error(formatted);
+    }
+  }
+
+  // Convenience methods for common operations
+  upload(message, data = null) { this.info('upload', message, data); }
+  download(message, data = null) { this.info('download', message, data); }
+  processing(message, data = null) { this.info('processing', message, data); }
+  complete(message, data = null) { this.info('complete', message, data); }
+  chunk(message, data = null) { this.info('chunk', message, data); }
+  transcribe(message, data = null) { this.info('transcribe', message, data); }
+  llm(message, data = null) { this.info('llm', message, data); }
+  api(message, data = null) { this.info('api', message, data); }
+  stats(message, data = null) { this.info('stats', message, data); }
+  stream(message, data = null) { this.info('stream', message, data); }
+}
+
+// Create CLI logger instance
+const cliLogger = new UnifiedLogger('CLI', UnifiedLogger.levels.INFO);
+
 // Configuration
 const DEFAULT_BASE_URL = process.env.LOCAL_URL || 'http://localhost:8787';
 const PRODUCTION_URL = process.env.PRODUCTION_URL || 'https://your-worker-name.your-subdomain.workers.dev';
@@ -305,22 +446,23 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}`);
 │   1. 📤 Direct Upload (Recommended)                         │
 │   2. 🌐 URL Upload (From web)                               │
 │   3. 🔧 Presigned Upload (Advanced)                         │
+│   4. 🌊 Streaming Upload (Real-time results)               │
 │                                                             │
 │ Job Management:                                             │
-│   4. 📋 List Jobs                                           │
-│   5. 📊 Check Job Status                                    │
-│   6. 📄 Get Job Results                                     │
-│   7. 🗑️  Delete Job                                          │
+│   5. 📋 List Jobs                                           │
+│   6. 📊 Check Job Status                                    │
+│   7. 📄 Get Job Results                                     │
+│   8. 🗑️  Delete Job                                          │
 │                                                             │
 │ Settings:                                                   │
-│   8. ⚙️  Change Endpoint                                     │
-│   9. ❓ Help & Examples                                     │
-│  10. 🌐 Test Connectivity                                   │
+│   9. ⚙️  Change Endpoint                                     │
+│  10. ❓ Help & Examples                                     │
+│  11. 🌐 Test Connectivity                                   │
 │   0. 🚪 Exit                                                │
 └─────────────────────────────────────────────────────────────┘
 `);
 
-    const choice = await this.question('Choose an option (0-10): ');
+    const choice = await this.question('Choose an option (0-11): ');
     return choice.trim();
   }
 
@@ -441,6 +583,11 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}`);
    • Best for: Large files, custom upload logic
    • Complexity: ⭐⭐ Advanced
    • Two-step process for maximum control
+
+4. Streaming Upload (Real-time)
+   • Best for: Testing, real-time feedback, development
+   • Complexity: ⭐ Simple
+   • Processes audio in tiny chunks with live results
 
 💡 Pro Tips:
 • LLM correction is enabled by default for better transcript quality
@@ -842,6 +989,350 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     return '[' + '█'.repeat(filled) + '░'.repeat(empty) + ']';
   }
 
+  async streamingUpload() {
+    console.log(`\n🌊 Streaming Upload (Real-time results)\n`);
+    console.log('📖 This method processes audio in tiny chunks and streams results in real-time');
+    console.log('💡 Perfect for testing the streaming API or getting incremental results\n');
+    
+    // Option to upload file or URL
+    const sourceType = await this.question('Upload source:\n1. 📁 File\n2. 🌐 URL\nChoose (1-2): ');
+    
+    let audioSource = {};
+    
+    if (sourceType.trim() === '1') {
+      const filePath = await this.question('Enter file path: ');
+      
+      if (!existsSync(filePath)) {
+        console.log('❌ File not found');
+        return;
+      }
+
+      const stats = statSync(filePath);
+      const fileSize = stats.size;
+      const filename = basename(filePath);
+      
+      console.log(`📁 File: ${filename}`);
+      console.log(`📊 Size: ${this.formatBytes(fileSize)}`);
+      
+      audioSource = { type: 'file', filePath, filename, fileSize };
+      
+    } else if (sourceType.trim() === '2') {
+      const url = await this.question('Enter audio URL: ');
+      if (!url.trim()) {
+        console.log('❌ URL is required');
+        return;
+      }
+      
+      console.log(`🌐 URL: ${url}`);
+      audioSource = { type: 'url', url };
+      
+    } else {
+      console.log('❌ Invalid choice');
+      return;
+    }
+    
+    // Streaming settings
+    const chunkSizeMB = await this.question('Chunk size in MB (default 0.25MB for fast streaming): ');
+    const useLLM = await this.question('Enable LLM correction? (Y/n): ');
+    
+    let llmMode = 'per_chunk';
+    if (useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y')) {
+      const mode = await this.question('LLM mode:\n1. Per-chunk (real-time, faster)\n2. Post-process (full context, slower)\nChoose (1-2, default 1): ');
+      llmMode = mode.trim() === '2' ? 'post_process' : 'per_chunk';
+    }
+    
+    const finalChunkSize = parseFloat(chunkSizeMB.trim()) || 0.25;
+    const enableLLM = useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y');
+    
+    console.log(`\n⚙️  Settings:`);
+    console.log(`   • Chunk size: ${finalChunkSize}MB`);
+    console.log(`   • LLM correction: ${enableLLM ? 'Enabled' : 'Disabled'}`);
+    if (enableLLM) {
+      console.log(`   • LLM mode: ${llmMode === 'per_chunk' ? 'Per-chunk (real-time)' : 'Post-process (full context)'}`);
+    }
+    console.log(`   • Streaming: Real-time results\n`);
+
+    // Check connectivity before proceeding
+    if (!(await this.checkConnectivityBeforeOperation())) {
+      return;
+    }
+
+    try {
+      console.log('🚀 Starting streaming transcription...\n');
+      
+      let requestBody, headers;
+      
+      if (audioSource.type === 'file') {
+        // File upload using FormData
+        const fileBuffer = readFileSync(audioSource.filePath);
+        const formData = new FormData();
+        
+        const blob = new Blob([fileBuffer], { 
+          type: this.getContentType(extname(audioSource.filename)) 
+        });
+        
+        formData.append('file', blob, audioSource.filename);
+        formData.append('chunk_size_mb', finalChunkSize.toString());
+        formData.append('use_llm', enableLLM.toString());
+        if (enableLLM) {
+          formData.append('llm_mode', llmMode);
+        }
+        
+        requestBody = formData;
+        headers = {}; // Let fetch set Content-Type for FormData
+        
+      } else {
+        // URL upload using JSON
+        const jsonPayload = {
+          url: audioSource.url,
+          chunk_size_mb: finalChunkSize,
+          use_llm: enableLLM
+        };
+        
+        if (enableLLM) {
+          jsonPayload.llm_mode = llmMode;
+        }
+        
+        requestBody = JSON.stringify(jsonPayload);
+        headers = { 'Content-Type': 'application/json' };
+      }
+      
+      const response = await fetch(`${this.baseUrl}/stream`, {
+        method: 'POST',
+        headers,
+        body: requestBody
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`❌ Streaming failed: ${errorText}`);
+        return;
+      }
+      
+      // Process the streaming response
+      await this.processStreamingResponse(response);
+      
+    } catch (error) {
+      console.log(`❌ Error: ${error.message}`);
+    }
+  }
+  
+    async processStreamingResponse(response) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    
+    let fullTranscript = '';
+    let chunkCount = 0;
+    const startTime = Date.now();
+    let buffer = '';
+    
+    cliLogger.stream('Processing streaming response...');
+    
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          // Process any remaining data in buffer
+          if (buffer.trim()) {
+            this.processBufferLines(buffer, { fullTranscript, chunkCount, startTime });
+          }
+          cliLogger.complete('Streaming completed!');
+          break;
+        }
+        
+        // Decode chunk and add to buffer
+        const chunk = decoder.decode(value, { stream: true });
+        
+        buffer += chunk;
+        
+        // Process complete lines immediately
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              // Process each event immediately and yield control
+              await this.handleStreamEvent(data, { 
+                fullTranscript, 
+                chunkCount, 
+                startTime 
+              });
+              
+              // Update tracking variables
+              if (data.type === 'delta') {
+                const text = data.text || data.raw_text || '';
+                fullTranscript += (fullTranscript ? ' ' : '') + text;
+                chunkCount++;
+              }
+              
+            } catch (parseError) {
+              // Skip invalid JSON lines
+              continue;
+            }
+          }
+        }
+      }
+      
+      // Show final summary
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      cliLogger.stats('Streaming summary', {
+        chunks_processed: chunkCount,
+        processing_time: `${duration}s`,
+        transcript_length: fullTranscript.length
+      });
+      
+             // Ask to save transcript
+       if (fullTranscript) {
+         try {
+           const save = await this.question('\nSave transcript to file? (Y/n): ');
+           if (save.trim() === '' || save.toLowerCase().startsWith('y')) {
+             const filename = await this.question('Enter filename (default: streaming_transcript.txt): ');
+             const outputFile = filename.trim() || 'streaming_transcript.txt';
+             
+             try {
+               const fs = await import('fs');
+               
+               // For now, save the full transcript (we'll get final from the 'done' event)
+               fs.writeFileSync(outputFile, fullTranscript);
+               cliLogger.complete(`Transcript saved`, { filename: outputFile });
+               
+             } catch (error) {
+               cliLogger.error('Failed to save transcript file', error);
+             }
+           }
+         } catch (readlineError) {
+           // Handle case where readline is closed during streaming
+           console.log(`\n💾 Auto-saving transcript to streaming_transcript.txt...`);
+           try {
+             const fs = await import('fs');
+             fs.writeFileSync('streaming_transcript.txt', fullTranscript);
+             console.log(`✅ Transcript auto-saved to: streaming_transcript.txt`);
+           } catch (error) {
+             console.log(`❌ Error auto-saving file: ${error.message}`);
+           }
+         }
+       }
+      
+    } catch (error) {
+      cliLogger.error('Error processing stream', error);
+    }
+  }
+  
+  processBufferLines(buffer, context) {
+    const lines = buffer.split('\n');
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          const data = JSON.parse(line.slice(6));
+          this.handleStreamEvent(data, context);
+          
+          // Update tracking variables
+          if (data.type === 'delta') {
+            const text = data.text || data.raw_text || '';
+            context.fullTranscript += (context.fullTranscript ? ' ' : '') + text;
+            context.chunkCount++;
+          }
+        } catch (parseError) {
+          // Skip invalid JSON lines
+          continue;
+        }
+      }
+    }
+  }
+
+  async handleStreamEvent(data, context) {
+    const { type } = data;
+    
+    switch (type) {
+      case 'status':
+        console.log(`📋 ${data.message}`);
+        console.log(`   • File: ${data.filename}`);
+        console.log(`   • Size: ${this.formatBytes(data.total_size)}`);
+        console.log(`   • Estimated chunks: ${data.estimated_chunks}\n`);
+        break;
+        
+      case 'chunk_info':
+        console.log(`🧩 Ready to process ${data.total_chunks} chunks (${data.chunk_size_mb}MB each)\n`);
+        break;
+        
+             case 'chunk_start':
+         process.stdout.write(`\n🔄 Chunk ${data.chunk_index + 1} (${data.progress}%) - transcribing...`);
+         break;
+         
+       case 'delta':
+         // Print the incremental text immediately after transcription
+         if (data.llm_applied) {
+           process.stdout.write(`\n📝 Raw: "${data.raw_text}"`);
+           process.stdout.write(`\n🧠 LLM: "${data.corrected_text}"`);
+         } else if (data.llm_error) {
+           process.stdout.write(`\n📝 "${data.raw_text}"`);
+           process.stdout.write(`\n⚠️  LLM failed: ${data.llm_error}`);
+         } else {
+           // Backward compatibility or no LLM
+           const text = data.text || data.raw_text;
+           process.stdout.write(`\n📝 "${text}"`);
+         }
+         break;
+         
+       case 'chunk_done':
+         process.stdout.write(` ✅ (${data.progress}%)\n`);
+         break;
+        
+      case 'chunk_error':
+        process.stdout.write(`❌ Error: ${data.error}\n`);
+        break;
+        
+             case 'llm_processing':
+         const mode = data.mode === 'post_process' ? 'post-processing' : 'per-chunk';
+         console.log(`\n🧠 ${data.message || `Applying LLM corrections (${mode})...`}`);
+         break;
+         
+       case 'llm_done':
+         const doneMode = data.mode === 'post_process' ? 'Post-processing' : 'Per-chunk';
+         console.log(`✅ ${doneMode} LLM correction completed`);
+         if (data.mode === 'post_process') {
+           console.log(`📝 Improved transcript:`);
+           console.log(`"${data.corrected_text}"\n`);
+         }
+         break;
+         
+       case 'llm_error':
+         const errorMode = data.mode === 'post_process' ? 'Post-processing' : 'Per-chunk';
+         console.log(`❌ ${errorMode} LLM correction failed: ${data.error}`);
+         if (data.fallback_text) {
+           console.log(`📝 Using original transcript: "${data.fallback_text}"\n`);
+         }
+         break;
+        
+             case 'done':
+         console.log(`\n🎉 Transcription completed!`);
+         console.log(`📊 Total segments: ${data.total_segments}`);
+         
+         if (data.llm_correction_applied && data.corrected_transcript) {
+           console.log(`📝 Raw transcript:`);
+           console.log(`"${data.raw_transcript}"`);
+           console.log(`\n🧠 LLM-corrected transcript:`);
+           console.log(`"${data.corrected_transcript}"`);
+         } else {
+           console.log(`📝 Final transcript:`);
+           console.log(`"${data.final_transcript}"`);
+         }
+         break;
+        
+      case 'error':
+        console.log(`❌ Stream error: ${data.error}`);
+        break;
+        
+      default:
+        // Handle unknown event types gracefully
+        console.log(`📨 ${type}: ${JSON.stringify(data)}`);
+    }
+  }
+
   async listJobs() {
     console.log(`\n📋 Listing Jobs\n`);
     
@@ -1090,24 +1581,27 @@ Video: MP4, MPEG, WEBM (audio track extracted)
             await this.presignedUpload();
             break;
           case '4':
-            await this.listJobs();
+            await this.streamingUpload();
             break;
           case '5':
-            await this.checkJobStatus();
+            await this.listJobs();
             break;
           case '6':
-            await this.getJobResults();
+            await this.checkJobStatus();
             break;
           case '7':
-            await this.deleteJob();
+            await this.getJobResults();
             break;
           case '8':
-            await this.changeEndpoint();
+            await this.deleteJob();
             break;
           case '9':
-            await this.showHelp();
+            await this.changeEndpoint();
             break;
           case '10':
+            await this.showHelp();
+            break;
+          case '11':
             await this.testConnectivity();
             break;
           case '0':
@@ -1121,12 +1615,23 @@ Video: MP4, MPEG, WEBM (audio track extracted)
 
         // Wait for user to continue
         console.log('\n');
-        await this.question('Press Enter to continue...');
-        console.clear();
+        try {
+          await this.question('Press Enter to continue...');
+          console.clear();
+        } catch (readlineError) {
+          // Handle case where readline was closed during streaming
+          console.log('Returning to main menu...');
+          console.clear();
+        }
 
       } catch (error) {
         console.log(`❌ Unexpected error: ${error.message}`);
-        await this.question('Press Enter to continue...');
+        try {
+          await this.question('Press Enter to continue...');
+        } catch (readlineError) {
+          // Handle case where readline was closed
+          console.log('Returning to main menu...');
+        }
       }
     }
   }

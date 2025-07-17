@@ -13,6 +13,7 @@ A high-performance Cloudflare Worker that provides a unified API for Groq's Whis
 - 📊 **Real-time progress tracking** with job management
 - 🌐 **Translation support** to English
 - ⏱️ **Word-level timestamps** and segment metadata
+- 🌊 **Streaming transcription** with real-time results and LLM correction
 - 🖥️ **Beautiful unified interface** - one interface for all file sizes
 - 💰 **Cost estimation** and controls
 - 📈 **Health monitoring** and service status
@@ -540,6 +541,8 @@ curl -X POST http://localhost:8787/delete-job \
 | **Presigned Upload** |
 | `/get-presigned-url` | POST | Get presigned URL for file upload |
 | `/start` | POST | Trigger processing after upload |
+| **Streaming API** |
+| `/stream` | POST | Real-time streaming transcription with SSE |
 | **Status & Management** |
 | `/status?job_id=<id>` | GET | Check job processing status |
 | `/result?job_id=<id>` | GET | Get final transcript results |
@@ -1347,3 +1350,350 @@ curl "http://localhost:8787/result?job_id=<job_id>"
 ## 📝 License
 
 MIT License - see LICENSE file for details. 
+
+## 🌊 Streaming API - Real-time Transcription
+
+The streaming API processes audio in tiny chunks and returns results as Server-Sent Events (SSE), similar to Groq's chat completion streaming format. Perfect for real-time applications and testing.
+
+### 🚀 Quick Start
+
+#### CLI Method (Recommended)
+```bash
+# Start the development server
+npm run dev
+
+# Run the CLI
+node cli.js
+
+# Choose option 4 (🌊 Streaming Upload)
+```
+
+#### Direct API Usage
+```bash
+# Stream with file upload
+curl -X POST http://localhost:8787/stream \
+  -F "file=@example.wav" \
+  -F "chunk_size_mb=1" \
+  -F "use_llm=true" \
+  -F "llm_mode=per_chunk"
+
+# Stream with URL
+curl -X POST http://localhost:8787/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/audio.mp3",
+    "chunk_size_mb": 0.5,
+    "use_llm": true,
+    "llm_mode": "per_chunk"
+  }'
+```
+
+### 🎯 Streaming Parameters
+
+| Parameter | Description | Default | Options |
+|-----------|-------------|---------|---------|
+| `chunk_size_mb` | Size of each processing chunk in MB | 0.25 | 0.1 - 5.0 |
+| `use_llm` | Enable LLM transcript correction | false | true/false |
+| `llm_mode` | LLM correction mode | per_chunk | per_chunk/post_process |
+| `filename` | Custom filename for uploads | auto-detected | any string |
+
+### ⚡ LLM Correction Modes
+
+| Mode | Description | Speed | Quality | Use Case |
+|------|-------------|-------|---------|----------|
+| `per_chunk` | Real-time correction per chunk | ⚡⚡⚡ Fast | ⭐⭐ Good | Real-time streaming, live demos |
+| `post_process` | Full-context correction after all chunks | ⚡ Slower | ⭐⭐⭐ Best | Batch processing, highest quality |
+| `disabled` | No LLM correction | ⚡⚡⚡ Fastest | ⭐ Raw | Testing, development |
+
+### 📡 Streaming Response Format
+
+The streaming API returns Server-Sent Events in this format:
+
+```
+data: {"type": "status", "message": "Starting transcription", "filename": "audio.mp3", ...}
+
+data: {"type": "chunk_info", "total_chunks": 5, "chunk_size_mb": 1}
+
+data: {"type": "chunk_start", "chunk_index": 0, "progress": 20}
+
+data: {"type": "delta", "chunk_index": 0, "raw_text": "hello", "corrected_text": "Hello,", "llm_applied": true}
+
+data: {"type": "chunk_done", "chunk_index": 0, "progress": 20}
+
+data: {"type": "done", "final_transcript": "Complete transcription...", "total_segments": 25}
+```
+
+### 🎬 Event Types Reference
+
+| Event Type | Description | Key Fields |
+|------------|-------------|------------|
+| `status` | Initial processing status | `filename`, `total_size`, `estimated_chunks` |
+| `chunk_info` | Chunk processing details | `total_chunks`, `chunk_size_mb` |
+| `chunk_start` | Starting to process a chunk | `chunk_index`, `progress` |
+| **`delta`** | **Incremental transcript text** | `raw_text`, `corrected_text?`, `llm_applied`, `segments` |
+| `chunk_done` | Chunk processing completed | `chunk_index`, `progress` |
+| `chunk_error` | Chunk processing failed | `chunk_index`, `error` |
+| `llm_processing` | LLM correction starting | `message`, `mode` |
+| `llm_done` | LLM correction completed | `corrected_text`, `mode` |
+| `llm_error` | LLM correction failed | `error`, `fallback_text`, `mode` |
+| **`done`** | **Final completion** | `final_transcript`, `total_segments`, `llm_correction_applied` |
+| `error` | Stream error | `error` |
+
+### 🔧 Streaming Settings
+
+#### Chunk Size Guidelines
+```bash
+# Ultra-fast streaming (real-time demos)
+"chunk_size_mb": 0.25
+
+# Fast streaming (balanced)
+"chunk_size_mb": 0.5
+
+# Standard streaming
+"chunk_size_mb": 1.0
+
+# Slower streaming (fewer API calls)
+"chunk_size_mb": 2.0
+```
+
+#### LLM Correction Examples
+```bash
+# No LLM (fastest)
+curl -X POST http://localhost:8787/stream \
+  -F "file=@audio.mp3" \
+  -F "use_llm=false"
+
+# Real-time per-chunk LLM correction
+curl -X POST http://localhost:8787/stream \
+  -F "file=@audio.mp3" \
+  -F "use_llm=true" \
+  -F "llm_mode=per_chunk"
+
+# Full-context post-processing (best quality)
+curl -X POST http://localhost:8787/stream \
+  -F "file=@audio.mp3" \
+  -F "use_llm=true" \
+  -F "llm_mode=post_process"
+```
+
+### 🎵 Complete Streaming Examples
+
+#### Example 1: Basic File Streaming
+```bash
+curl -X POST http://localhost:8787/stream \
+  -F "file=@example.wav" \
+  -F "chunk_size_mb=1" \
+  -F "use_llm=false"
+```
+
+**Response Stream:**
+```
+data: {"type": "status", "message": "Starting transcription", "filename": "example.wav", "total_size": 4500}
+
+data: {"type": "chunk_info", "total_chunks": 1, "chunk_size_mb": 1}
+
+data: {"type": "chunk_start", "chunk_index": 0, "progress": 100}
+
+data: {"type": "delta", "chunk_index": 0, "raw_text": "Hello, this is a test audio file for the Groq Whisper XL transcription service.", "segments": [...]}
+
+data: {"type": "chunk_done", "chunk_index": 0, "progress": 100}
+
+data: {"type": "done", "final_transcript": "Hello, this is a test audio file for the Groq Whisper XL transcription service.", "total_segments": 1}
+```
+
+#### Example 2: URL Streaming with LLM
+```bash
+curl -X POST http://localhost:8787/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/podcast.mp3",
+    "chunk_size_mb": 0.5,
+    "use_llm": true,
+    "llm_mode": "per_chunk"
+  }'
+```
+
+#### Example 3: JavaScript Implementation
+```javascript
+async function streamTranscription(audioFile) {
+  const formData = new FormData();
+  formData.append('file', audioFile);
+  formData.append('chunk_size_mb', '1');
+  formData.append('use_llm', 'true');
+  formData.append('llm_mode', 'per_chunk');
+
+  const response = await fetch('/stream', {
+    method: 'POST',
+    body: formData
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let fullTranscript = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const chunk = decoder.decode(value, { stream: true });
+    const lines = chunk.split('\\n');
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = JSON.parse(line.slice(6));
+        
+        switch (data.type) {
+          case 'delta':
+            if (data.llm_applied) {
+              console.log('📝 Raw:', data.raw_text);
+              console.log('🧠 LLM:', data.corrected_text);
+              fullTranscript += data.corrected_text + ' ';
+            } else {
+              console.log('📝 Text:', data.raw_text || data.text);
+              fullTranscript += (data.raw_text || data.text) + ' ';
+            }
+            break;
+          case 'done':
+            console.log('✅ Final transcript:', data.final_transcript);
+            return data.final_transcript;
+          case 'error':
+            console.error('❌ Error:', data.error);
+            throw new Error(data.error);
+        }
+      }
+    }
+  }
+  
+  return fullTranscript.trim();
+}
+
+// Usage
+const fileInput = document.getElementById('audio-file');
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    try {
+      const transcript = await streamTranscription(file);
+      console.log('Final result:', transcript);
+    } catch (error) {
+      console.error('Streaming failed:', error);
+    }
+  }
+});
+```
+
+### 🎯 Performance Comparison
+
+| Feature | Standard API | Streaming API |
+|---------|-------------|---------------|
+| **Response Time** | Wait for completion | Real-time chunks |
+| **Chunk Size** | 20MB | 0.25-5MB (configurable) |
+| **Progress Updates** | Polling required | Built-in streaming |
+| **Use Case** | Production batch processing | Development, testing, real-time UX |
+| **Resource Usage** | Lower (fewer API calls) | Higher (more API calls) |
+| **LLM Modes** | Post-processing only | Per-chunk + Post-processing |
+
+### 💡 When to Use Streaming
+
+✅ **Perfect for:**
+- 🧪 Testing and development
+- 🎮 Interactive applications  
+- 📱 Real-time user interfaces
+- 🔍 Quick previews of transcription quality
+- 🎥 Live demos and presentations
+
+❌ **Not ideal for:**
+- 🏭 High-volume production processing
+- 💰 Cost-sensitive applications (more API calls)
+- 🔄 Batch processing large files
+
+### 🔧 Streaming CLI Features
+
+The CLI provides the most comprehensive streaming experience:
+
+```bash
+# Run the CLI
+node cli.js
+
+# Choose option 4: 🌊 Streaming Upload (Real-time results)
+
+# CLI streaming options:
+Upload source:
+1. 📁 File
+2. 🌐 URL
+Choose (1-2): 1
+
+Enter file path: ./audio.mp3
+Chunk size in MB (default 0.25MB for fast streaming): 1
+Enable LLM correction? (Y/n): y
+LLM mode:
+1. Per-chunk (real-time, faster)
+2. Post-process (full context, slower)
+Choose (1-2, default 1): 1
+
+# Real-time output:
+📋 Starting transcription of audio.mp3 (45.2 MB)...
+🧩 Ready to process 46 chunks (1MB each)
+
+🔄 Chunk 1 (2%) - transcribing...
+📝 Raw: "hello this is the beginning"
+🧠 LLM: "Hello, this is the beginning"
+✅ Chunk 1 completed (2%)
+
+🔄 Chunk 2 (4%) - transcribing...
+📝 Raw: "of my audio recording"
+🧠 LLM: "of my audio recording."
+✅ Chunk 2 completed (4%)
+
+# ... continues for all chunks ...
+
+🎉 Transcription completed!
+📊 Total segments: 125
+💾 Transcript ready for download!
+
+Save transcript to file? (Y/n): y
+Enter filename (default: streaming_transcript.txt): my_transcript.txt
+✅ Transcript saved to: my_transcript.txt
+```
+
+### 🎵 Testing Streaming
+
+Use the included sample audio file:
+
+```bash
+# Test basic streaming
+curl -X POST http://localhost:8787/stream \
+  -F "file=@example.wav" \
+  -F "chunk_size_mb=0.25"
+
+# Test with LLM correction
+curl -X POST http://localhost:8787/stream \
+  -F "file=@example.wav" \
+  -F "chunk_size_mb=0.5" \
+  -F "use_llm=true" \
+  -F "llm_mode=per_chunk"
+```
+
+### 🔍 Debugging Streaming
+
+#### Check Server Status
+```bash
+curl http://localhost:8787/health
+```
+
+#### Verbose Streaming
+```bash
+curl -v -X POST http://localhost:8787/stream \
+  -F "file=@sample.wav" \
+  -F "chunk_size_mb=1"
+```
+
+#### Monitor Streaming in CLI
+The CLI tool (option 4) provides the best debugging experience with:
+- Real-time progress indicators
+- Detailed error handling
+- Live transcript display
+- Performance metrics
+- Automatic transcript saving
+
+--- 

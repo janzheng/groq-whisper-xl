@@ -1,9 +1,165 @@
 import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { STATIC_FILES } from './static-web.js';
+
+// ============================================================================
+// UNIFIED LOGGING SYSTEM
+// ============================================================================
+
+/**
+ * Standardized logging system for consistent output across CLI, Web, and API
+ * Provides emoji-based categorization and multiple log levels
+ */
+class UnifiedLogger {
+  static levels = {
+    DEBUG: 0,
+    INFO: 1,
+    WARN: 2,
+    ERROR: 3
+  };
+
+  static emojis = {
+    // Process states
+    start: '🚀',
+    processing: '🔄',
+    complete: '✅',
+    failed: '❌',
+    
+    // File operations
+    upload: '📤',
+    download: '📥',
+    file: '📁',
+    delete: '🗑️',
+    
+    // Audio/transcription
+    audio: '🎵',
+    transcribe: '🎤',
+    chunk: '🧩',
+    stream: '🌊',
+    llm: '🧠',
+    
+    // Network/API
+    api: '📡',
+    webhook: '🔗',
+    url: '🌐',
+    
+    // Status/info
+    info: 'ℹ️',
+    warning: '⚠️',
+    error: '❌',
+    debug: '🔍',
+    stats: '📊',
+    time: '⏱️',
+    progress: '📈'
+  };
+
+  constructor(context = 'SYSTEM', level = UnifiedLogger.levels.INFO) {
+    this.context = context;
+    this.level = level;
+    this.isServer = typeof window === 'undefined';
+  }
+
+  _formatMessage(emoji, message, data = null) {
+    const timestamp = new Date().toISOString();
+    const prefix = `${emoji} [${this.context}]`;
+    
+    if (data) {
+      return `${prefix} ${message} | ${JSON.stringify(data)}`;
+    }
+    return `${prefix} ${message}`;
+  }
+
+  debug(message, data = null) {
+    if (this.level <= UnifiedLogger.levels.DEBUG) {
+      const formatted = this._formatMessage(UnifiedLogger.emojis.debug, message, data);
+      console.log(formatted);
+    }
+  }
+
+  info(emoji, message, data = null) {
+    if (this.level <= UnifiedLogger.levels.INFO) {
+      const emojiSymbol = UnifiedLogger.emojis[emoji] || emoji;
+      const formatted = this._formatMessage(emojiSymbol, message, data);
+      console.log(formatted);
+    }
+  }
+
+  warn(message, data = null) {
+    if (this.level <= UnifiedLogger.levels.WARN) {
+      const formatted = this._formatMessage(UnifiedLogger.emojis.warning, message, data);
+      console.warn(formatted);
+    }
+  }
+
+  error(message, error = null, data = null) {
+    if (this.level <= UnifiedLogger.levels.ERROR) {
+      const errorData = error ? { 
+        message: error.message, 
+        stack: error.stack?.substring(0, 200),
+        ...data 
+      } : data;
+      const formatted = this._formatMessage(UnifiedLogger.emojis.error, message, errorData);
+      console.error(formatted);
+    }
+  }
+
+  // Convenience methods for common operations
+  upload(message, data = null) { this.info('upload', message, data); }
+  download(message, data = null) { this.info('download', message, data); }
+  processing(message, data = null) { this.info('processing', message, data); }
+  complete(message, data = null) { this.info('complete', message, data); }
+  chunk(message, data = null) { this.info('chunk', message, data); }
+  transcribe(message, data = null) { this.info('transcribe', message, data); }
+  llm(message, data = null) { this.info('llm', message, data); }
+  api(message, data = null) { this.info('api', message, data); }
+  stats(message, data = null) { this.info('stats', message, data); }
+}
+
+// Create loggers for different contexts
+const apiLogger = new UnifiedLogger('API', UnifiedLogger.levels.INFO);
+const processingLogger = new UnifiedLogger('PROCESSING', UnifiedLogger.levels.INFO);
+const streamLogger = new UnifiedLogger('STREAM', UnifiedLogger.levels.INFO);
+
+// Helper function to format bytes consistently
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// ============================================================================
+// MAIN CLOUDFLARE WORKER EXPORT
+// ============================================================================
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    
+    // Serve static files for the web interface
+    if (request.method === 'GET') {
+      // Serve the main page for root and unknown paths
+      if (url.pathname === '/' || url.pathname === '/index.html') {
+        return new Response(STATIC_FILES['/'], {
+          headers: { 'Content-Type': 'text/html' }
+        });
+      }
+      
+      // Serve CSS file
+      if (url.pathname === '/assets/app.css') {
+        return new Response(STATIC_FILES['/assets/app.css'], {
+          headers: { 'Content-Type': 'text/css' }
+        });
+      }
+      
+      // Serve JS file
+      if (url.pathname === '/assets/app.js') {
+        return new Response(STATIC_FILES['/assets/app.js'], {
+          headers: { 'Content-Type': 'application/javascript' }
+        });
+      }
+    }
     
     // Direct Upload API - Simple one-step uploads
     if (url.pathname === '/upload' && request.method === 'POST') {
@@ -19,6 +175,11 @@ export default {
       return handleStartProcessing(request, env);
     } 
     
+    // Streaming API
+    else if (url.pathname === '/stream' && request.method === 'POST') {
+      return handleStreamingTranscription(request, env);
+    }
+    
     // Status and Management
     else if (url.pathname === '/status' && request.method === 'GET') {
       return handleStatus(request, env);
@@ -28,10 +189,19 @@ export default {
       return handleListJobs(request, env);
     } else if (url.pathname === '/delete-job' && request.method === 'POST') {
       return handleDeleteJob(request, env);
+    } else if (url.pathname === '/save-streaming-job' && request.method === 'POST') {
+      return handleSaveStreamingJob(request, env);
     } else if (url.pathname === '/process' && request.method === 'POST') {
       return handleManualProcess(request, env);
     } else if (url.pathname === '/health' && request.method === 'GET') {
       return handleHealth(request, env);
+    }
+    
+    // For any other GET request, serve the main page (SPA fallback)
+    if (request.method === 'GET') {
+      return new Response(STATIC_FILES['/'], {
+        headers: { 'Content-Type': 'text/html' }
+      });
     }
     
     return new Response('Not found', { status: 404 });
@@ -170,7 +340,7 @@ async function handleDirectUpload(request, env) {
     });
     
   } catch (error) {
-    console.error('Direct upload error:', error);
+    apiLogger.error('Direct upload failed', error);
     return new Response(JSON.stringify({ 
       error: 'Upload failed', 
       message: error.message 
@@ -210,14 +380,16 @@ async function handleUrlUpload(request, env) {
       parsedUrl = new URL(finalUrl);
       
       // Log the parsed URL for debugging
-      console.log(`🔍 Original URL: ${audioUrl}`);
-      console.log(`🔍 Final URL: ${finalUrl}`);
-      console.log(`🔍 Host: ${parsedUrl.host}`);
-      console.log(`🔍 Pathname: ${parsedUrl.pathname}`);
-      console.log(`🔍 Search params: ${parsedUrl.search}`);
+      apiLogger.debug('URL parsing details', {
+        original: audioUrl,
+        final: finalUrl,
+        host: parsedUrl.host,
+        pathname: parsedUrl.pathname,
+        search: parsedUrl.search
+      });
       
     } catch (error) {
-      console.error('URL parsing error:', error);
+      apiLogger.error('URL parsing failed', error, { provided_url: audioUrl });
       return new Response(JSON.stringify({ 
         error: 'Invalid URL provided',
         details: error.message,
@@ -228,7 +400,7 @@ async function handleUrlUpload(request, env) {
     // Extract filename from URL if not provided
     const extractedFilename = filename || parsedUrl.pathname.split('/').pop() || 'audio.mp3';
     
-    console.log(`🌐 Fetching audio from: ${finalUrl}`);
+    apiLogger.download(`Fetching audio from URL`, { url: finalUrl });
     
     // Fetch the file with better error handling and headers
     let response;
@@ -245,7 +417,7 @@ async function handleUrlUpload(request, env) {
         signal: AbortSignal.timeout(30000) // 30 second timeout
       });
     } catch (fetchError) {
-      console.error('Fetch error:', fetchError);
+      apiLogger.error('Failed to fetch audio from URL', fetchError, { url: finalUrl });
       
       // Provide more specific error messages
       let errorDetails = fetchError.message;
@@ -265,7 +437,11 @@ async function handleUrlUpload(request, env) {
     }
     
     if (!response.ok) {
-      console.error(`HTTP ${response.status}: ${response.statusText}`);
+      apiLogger.error('HTTP error from audio URL', null, { 
+        status: response.status, 
+        statusText: response.statusText,
+        url: finalUrl 
+      });
               return new Response(JSON.stringify({ 
           error: 'Failed to fetch audio from URL',
           status: response.status,
@@ -279,7 +455,10 @@ async function handleUrlUpload(request, env) {
     // Check content type
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.startsWith('audio/') && !contentType.startsWith('video/')) {
-      console.warn(`Warning: Content-Type is ${contentType}, proceeding anyway`);
+      apiLogger.warn(`Unexpected content type, proceeding anyway`, { 
+        contentType, 
+        url: finalUrl 
+      });
     }
     
     // Get file data
@@ -296,7 +475,11 @@ async function handleUrlUpload(request, env) {
       }), { status: 400 });
     }
     
-    console.log(`📁 Downloaded ${extractedFilename} (${formatBytes(fileSize)})`);
+    apiLogger.complete(`Downloaded file from URL`, { 
+      filename: extractedFilename, 
+      size: formatBytes(fileSize),
+      bytes: fileSize 
+    });
     
     // Create job and store file
     const job_id = crypto.randomUUID();
@@ -347,7 +530,7 @@ async function handleUrlUpload(request, env) {
     });
     
   } catch (error) {
-    console.error('URL upload error:', error);
+    apiLogger.error('URL upload failed', error);
     return new Response(JSON.stringify({ 
       error: 'URL upload failed', 
       message: error.message 
@@ -596,6 +779,406 @@ async function handleHealth(request, env) {
 }
 
 // ============================================================================
+// STREAMING API - Emulates Groq's streaming chat completion format
+// ============================================================================
+
+/**
+ * Streaming transcription that processes audio in tiny chunks and returns results as SSE stream
+ * Similar to Groq's chat completion streaming API
+ * 
+ * curl -X POST http://localhost:8787/stream \
+ *   -H "Content-Type: application/json" \
+ *   -d '{"url": "https://example.com/audio.mp3", "chunk_size_mb": 1, "use_llm": true}'
+ * 
+ * Or with file upload:
+ * curl -X POST http://localhost:8787/stream \
+ *   -F "file=@audio.mp3" \
+ *   -F "chunk_size_mb=1" \
+ *   -F "use_llm=true"
+ * 
+ * Note: LLM correction is disabled by default for streaming. Set use_llm=true to enable.
+ */
+async function handleStreamingTranscription(request, env) {
+  const contentType = request.headers.get('content-type') || '';
+  let audioData, filename, chunkSizeMB = 0.25, use_llm = false, llm_mode = 'per_chunk';
+  
+  try {
+    // Parse request data
+    if (contentType.includes('multipart/form-data')) {
+      const formData = await request.formData();
+      const file = formData.get('file');
+      
+      if (!file || !file.name) {
+        return new Response('data: {"error": "No file provided"}\n\n', { 
+          status: 400,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+      
+      filename = file.name;
+      audioData = await file.arrayBuffer();
+      chunkSizeMB = parseFloat(formData.get('chunk_size_mb')) || 0.25;
+      use_llm = formData.get('use_llm') === 'true'; // Explicitly false by default
+      llm_mode = formData.get('llm_mode') || 'per_chunk'; // 'per_chunk' or 'post_process'
+      
+    } else if (contentType.includes('application/json')) {
+      const body = await request.json();
+      
+      if (body.url) {
+        // Download from URL
+        try {
+          const response = await fetch(body.url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (compatible; Groq-Whisper-XL/1.0)',
+              'Accept': 'audio/*, video/*, */*'
+            },
+            signal: AbortSignal.timeout(30000)
+          });
+          
+          if (!response.ok) {
+            return createStreamError(`Failed to fetch audio: ${response.status}`);
+          }
+          
+          audioData = await response.arrayBuffer();
+          filename = body.url.split('/').pop() || 'audio.mp3';
+          
+        } catch (error) {
+          return createStreamError(`URL fetch failed: ${error.message}`);
+        }
+        
+      } else if (body.file_data) {
+        // Base64 encoded data
+        try {
+          audioData = Uint8Array.from(atob(body.file_data), c => c.charCodeAt(0)).buffer;
+          filename = body.filename || 'audio.mp3';
+        } catch (error) {
+          return createStreamError('Invalid base64 file_data');
+        }
+        
+      } else {
+        return createStreamError('Either url or file_data is required');
+      }
+      
+      chunkSizeMB = body.chunk_size_mb || 0.25;
+      use_llm = body.use_llm === true; // Explicitly require true, default false
+      llm_mode = body.llm_mode || 'per_chunk'; // 'per_chunk' or 'post_process'
+      
+    } else {
+      return createStreamError('Content-Type must be multipart/form-data or application/json');
+    }
+    
+    // Create job record for streaming transcription
+    const job_id = crypto.randomUUID();
+    const job = {
+      status: 'streaming',
+      filename,
+      size: audioData.byteLength,
+      actual_size: audioData.byteLength,
+      processing_method: 'streaming',
+      use_llm,
+      llm_mode,
+      chunk_size_mb: chunkSizeMB,
+      created_at: new Date().toISOString(),
+      processing_started_at: new Date().toISOString()
+    };
+    
+    // Store initial job state
+    await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
+    
+        // Create a ReadableStream for Server-Sent Events with aggressive flushing
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          await processAudioStreamChunks(
+            new Uint8Array(audioData), 
+            filename, 
+            chunkSizeMB, 
+            use_llm, 
+            llm_mode,
+            controller, 
+            env,
+            job_id  // Pass job_id for progress tracking
+          );
+        } catch (error) {
+          const errorData = createStreamChunk('error', { error: error.message });
+          controller.enqueue(new TextEncoder().encode(errorData));
+          
+          // Update job status to failed
+          const failedJob = { ...job, status: 'failed', error: error.message, failed_at: new Date().toISOString() };
+          await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(failedJob), { expirationTtl: 86400 });
+        } finally {
+          controller.close();
+        }
+      }
+    });
+    
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
+      }
+    });
+    
+  } catch (error) {
+    return createStreamError(`Streaming setup failed: ${error.message}`);
+  }
+}
+
+async function processAudioStreamChunks(audioBuffer, filename, chunkSizeMB, use_llm, llm_mode, controller, env, job_id = null) {
+  const chunkSize = chunkSizeMB * 1024 * 1024; // Convert MB to bytes
+  const ext = filename.split('.').pop() || 'mp3';
+  
+  // Send initial status
+  streamLogger.info('stream', 'Starting streaming transcription', {
+    filename,
+    total_size: formatBytes(audioBuffer.length),
+    chunk_size: formatBytes(chunkSize),
+    estimated_chunks: Math.ceil(audioBuffer.length / chunkSize),
+    llm_mode: use_llm ? llm_mode : 'disabled'
+  });
+  
+  controller.enqueue(new TextEncoder().encode(
+    createStreamChunk('status', { 
+      message: 'Starting transcription',
+      job_id,
+      filename,
+      total_size: audioBuffer.length,
+      chunk_size: chunkSize,
+      estimated_chunks: Math.ceil(audioBuffer.length / chunkSize),
+      llm_mode: use_llm ? llm_mode : 'disabled'
+    })
+  ));
+  
+  // Create tiny chunks for streaming
+  const chunks = createTinyChunks(audioBuffer, chunkSize);
+  let fullTranscript = '';
+  let correctedTranscript = '';
+  const segments = [];
+  
+  // Send chunk info
+  controller.enqueue(new TextEncoder().encode(
+    createStreamChunk('chunk_info', { 
+      total_chunks: chunks.length,
+      chunk_size_mb: chunkSizeMB,
+      llm_correction: use_llm ? llm_mode : 'disabled'
+    })
+  ));
+  
+  // Process each chunk and stream results
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    
+    try {
+      // Send chunk start event  
+      const chunkStartData = createStreamChunk('chunk_start', { 
+        chunk_index: i,
+        chunk_size: chunk.data.length,
+        progress: Math.round((i / chunks.length) * 100)
+      });
+      controller.enqueue(new TextEncoder().encode(chunkStartData));
+      
+      // Transcribe chunk
+      const transcript = await transcribeChunk(chunk.data, ext, env.GROQ_API_KEY);
+      
+      if (transcript.text) {
+        let correctedText = transcript.text;
+        
+        // Apply per-chunk LLM correction if enabled
+        if (use_llm && llm_mode === 'per_chunk') {
+          try {
+            correctedText = await applyPerChunkLLMCorrection(transcript.text, env.GROQ_API_KEY);
+            
+            // Send delta with both raw and corrected text
+            controller.enqueue(new TextEncoder().encode(
+              createStreamChunk('delta', { 
+                chunk_index: i,
+                raw_text: transcript.text,
+                corrected_text: correctedText,
+                segments: transcript.segments || [],
+                llm_applied: true
+              })
+            ));
+            
+          } catch (llmError) {
+            // LLM failed, send raw text only with error info
+            controller.enqueue(new TextEncoder().encode(
+              createStreamChunk('delta', { 
+                chunk_index: i,
+                raw_text: transcript.text,
+                corrected_text: transcript.text, // fallback to raw
+                segments: transcript.segments || [],
+                llm_applied: false,
+                llm_error: llmError.message
+              })
+            ));
+            correctedText = transcript.text; // use raw text as fallback
+          }
+        } else {
+          // No LLM correction requested
+          controller.enqueue(new TextEncoder().encode(
+            createStreamChunk('delta', { 
+              chunk_index: i,
+              text: transcript.text, // backward compatibility
+              raw_text: transcript.text,
+              segments: transcript.segments || [],
+              llm_applied: false
+            })
+          ));
+        }
+        
+        fullTranscript += (fullTranscript ? ' ' : '') + transcript.text;
+        correctedTranscript += (correctedTranscript ? ' ' : '') + correctedText;
+        
+        if (transcript.segments) {
+          segments.push(...transcript.segments);
+        }
+      }
+      
+      // Send chunk completion
+      controller.enqueue(new TextEncoder().encode(
+        createStreamChunk('chunk_done', { 
+          chunk_index: i,
+          progress: Math.round(((i + 1) / chunks.length) * 100)
+        })
+      ));
+      
+      // Send heartbeat to force stream flush  
+      controller.enqueue(new TextEncoder().encode('\n'));
+      
+      // Force immediate streaming with minimal delay
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+    } catch (error) {
+      // Send chunk error but continue
+      controller.enqueue(new TextEncoder().encode(
+        createStreamChunk('chunk_error', { 
+          chunk_index: i,
+          error: error.message
+        })
+      ));
+    }
+  }
+  
+  // Apply post-processing LLM correction if requested
+  let finalTranscript = fullTranscript;
+  
+  if (use_llm && llm_mode === 'post_process') {
+    controller.enqueue(new TextEncoder().encode(
+      createStreamChunk('llm_processing', { 
+        message: 'Applying LLM corrections to full transcript...',
+        mode: 'post_process'
+      })
+    ));
+    
+    try {
+      finalTranscript = await applyLLMCorrection(fullTranscript, env.GROQ_API_KEY);
+      
+      controller.enqueue(new TextEncoder().encode(
+        createStreamChunk('llm_done', { 
+          corrected_text: finalTranscript,
+          mode: 'post_process'
+        })
+      ));
+    } catch (error) {
+      controller.enqueue(new TextEncoder().encode(
+        createStreamChunk('llm_error', { 
+          error: error.message,
+          fallback_text: fullTranscript,
+          mode: 'post_process'
+        })
+      ));
+    }
+  } else if (use_llm && llm_mode === 'per_chunk') {
+    finalTranscript = correctedTranscript;
+  }
+  
+  // Send final completion
+  controller.enqueue(new TextEncoder().encode(
+    createStreamChunk('done', { 
+      job_id,
+      final_transcript: finalTranscript,
+      raw_transcript: fullTranscript,
+      corrected_transcript: use_llm && llm_mode === 'per_chunk' ? correctedTranscript : null,
+      total_segments: segments.length,
+      processing_completed: true,
+      llm_correction_applied: use_llm,
+      llm_mode: use_llm ? llm_mode : 'disabled'
+    })
+  ));
+  
+  // Update job status to completed if job_id provided
+  if (job_id && env.GROQ_JOBS_KV) {
+    try {
+      const jobData = await env.GROQ_JOBS_KV.get(job_id);
+      if (jobData) {
+        const job = JSON.parse(jobData);
+        job.status = 'done';
+        job.final_transcript = finalTranscript;
+        job.raw_transcript = fullTranscript;
+        job.corrected_transcript = use_llm && llm_mode === 'per_chunk' ? correctedTranscript : null;
+        job.total_segments = segments.length;
+        job.completed_at = new Date().toISOString();
+        job.llm_correction_applied = use_llm;
+        job.transcripts = [{ 
+          text: finalTranscript, 
+          raw_text: fullTranscript,
+          segments: segments,
+          start: 0,
+          duration: audioBuffer.length,
+          chunk_index: 'streaming'
+        }];
+        
+        await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
+        streamLogger.complete('Streaming job completed and saved', { 
+          job_id, 
+          filename,
+          transcript_length: finalTranscript?.length || 0
+        });
+      }
+    } catch (error) {
+      streamLogger.error('Failed to update streaming job completion', error, { job_id });
+    }
+  }
+}
+
+function createTinyChunks(buffer, chunkSize) {
+  const chunks = [];
+  const minOverlap = Math.min(1024 * 50, Math.floor(chunkSize * 0.02)); // 50KB or 2% overlap
+  
+  for (let start = 0; start < buffer.length; start += chunkSize - minOverlap) {
+    const end = Math.min(start + chunkSize, buffer.length);
+    const chunkData = buffer.slice(start, end);
+    
+    chunks.push({
+      start,
+      end,
+      data: chunkData,
+      size: chunkData.length
+    });
+    
+    if (end >= buffer.length) break;
+  }
+  
+  return chunks;
+}
+
+function createStreamChunk(type, data) {
+  return `data: ${JSON.stringify({ type, ...data })}\n\n`;
+}
+
+function createStreamError(message) {
+  return new Response(`data: ${JSON.stringify({ type: 'error', error: message })}\n\n`, {
+    status: 400,
+    headers: { 'Content-Type': 'text/plain' }
+  });
+}
+
+// ============================================================================
 // PROCESSING ENGINE
 // ============================================================================
 
@@ -627,22 +1210,27 @@ async function processFileIntelligently(job_id, env) {
     const response = await s3Client.send(getObjectCmd);
     const fileSize = response.ContentLength;
     
-    console.log(`🎵 Processing ${job.filename} (${formatBytes(fileSize)})`);
+    processingLogger.processing(`Starting processing`, {
+      filename: job.filename,
+      size: formatBytes(fileSize),
+      bytes: fileSize,
+      job_id: job_id
+    });
     
     // Decide processing strategy
     const CHUNK_THRESHOLD = 15 * 1024 * 1024; // 15MB
     const MAX_CHUNK_SIZE = 20 * 1024 * 1024;  // 20MB chunks
     
     if (fileSize <= CHUNK_THRESHOLD) {
-      console.log('📄 Using direct processing (small file)');
+      processingLogger.info('transcribe', 'Using direct processing (small file)');
       await processDirectly(job_id, response, env);
     } else {
-      console.log('🧩 Using chunked processing (large file)');
+      processingLogger.info('chunk', 'Using chunked processing (large file)');
       await processInChunks(job_id, response, fileSize, MAX_CHUNK_SIZE, env);
     }
     
   } catch (error) {
-    console.error('❌ Processing failed:', error);
+    processingLogger.error('Processing failed', error, { job_id, filename: job.filename });
     job.status = 'failed';
     job.error = error.message;
     job.failed_at = new Date().toISOString();
@@ -677,13 +1265,16 @@ async function processDirectly(job_id, fileResponse, env) {
   // Create blob for transcription
   const ext = job.filename.split('.').pop() || 'mp3';
   
-  console.log(`🎤 Transcribing ${job.filename} directly`);
+  processingLogger.transcribe(`Starting direct transcription`, { 
+    filename: job.filename, 
+    extension: ext 
+  });
   const transcript = await transcribeChunk(combined, ext, env.GROQ_API_KEY);
   
   // Apply LLM correction if requested
   let finalTranscript = transcript.text;
   if (job.use_llm && transcript.text) {
-    console.log('🧠 Applying LLM corrections');
+    processingLogger.llm('Applying LLM corrections to transcript');
     finalTranscript = await applyLLMCorrection(transcript.text, env.GROQ_API_KEY);
   }
   
@@ -707,7 +1298,11 @@ async function processDirectly(job_id, fileResponse, env) {
     await sendWebhook(job.webhook_url, job_id, job);
   }
   
-  console.log('✅ Direct processing completed');
+  processingLogger.complete('Direct processing completed', { 
+    job_id, 
+    filename: job.filename,
+    transcript_length: finalTranscript?.length || 0
+  });
 }
 
 /**
@@ -736,7 +1331,11 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
   
   // Create intelligent chunks with overlap
   const audioChunks = createChunks(fileBuffer, chunkSize);
-  console.log(`📊 Created ${audioChunks.length} chunks for processing`);
+  processingLogger.stats(`Created chunks for processing`, { 
+    total_chunks: audioChunks.length,
+    chunk_size: formatBytes(chunkSize),
+    job_id
+  });
   
   job.total_chunks = audioChunks.length;
   job.processed_chunks = 0;
@@ -748,7 +1347,11 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
   // Process chunks sequentially to avoid rate limits
   for (let i = 0; i < audioChunks.length; i++) {
     const chunk = audioChunks[i];
-    console.log(`🔄 Processing chunk ${i + 1}/${audioChunks.length} (${formatBytes(chunk.data.length)})`);
+    processingLogger.chunk(`Processing chunk ${i + 1}/${audioChunks.length}`, {
+      chunk_index: i + 1,
+      chunk_size: formatBytes(chunk.data.length),
+      job_id
+    });
     
     try {
       const transcript = await transcribeChunk(chunk.data, ext, env.GROQ_API_KEY);
@@ -765,7 +1368,10 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
       job.progress = Math.round((i + 1) / audioChunks.length * 100);
       await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
       
-      console.log(`✅ Chunk ${i + 1} completed (${job.progress}%)`);
+      processingLogger.complete(`Chunk ${i + 1} completed`, { 
+        progress: job.progress,
+        job_id
+      });
       
       // Small delay to avoid rate limiting
       if (i < audioChunks.length - 1) {
@@ -773,7 +1379,10 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
       }
       
     } catch (error) {
-      console.error(`❌ Chunk ${i + 1} failed:`, error.message);
+      processingLogger.error(`Chunk ${i + 1} failed`, error, { 
+        chunk_index: i + 1,
+        job_id
+      });
       // Continue with other chunks
     }
   }
@@ -783,12 +1392,15 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
   }
   
   // Merge transcripts intelligently
-  console.log('🔗 Merging transcripts');
+  processingLogger.processing('Merging transcripts from chunks', { 
+    chunk_count: transcripts.length,
+    job_id
+  });
   let mergedText = transcripts.map(t => t.text).join(' ');
   
   // Apply LLM correction if requested
   if (job.use_llm && mergedText) {
-    console.log('🧠 Applying LLM corrections to merged transcript');
+    processingLogger.llm('Applying LLM corrections to merged transcript');
     mergedText = await applyLLMCorrection(mergedText, env.GROQ_API_KEY);
   }
   
@@ -807,7 +1419,13 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
     await sendWebhook(job.webhook_url, job_id, job);
   }
   
-  console.log(`✅ Chunked processing completed (${transcripts.length}/${audioChunks.length} chunks successful)`);
+  processingLogger.complete('Chunked processing completed', { 
+    job_id,
+    successful_chunks: transcripts.length,
+    total_chunks: audioChunks.length,
+    success_rate: job.success_rate,
+    transcript_length: mergedText?.length || 0
+  });
 }
 
 async function transcribeChunk(data, ext, apiKey) {
@@ -848,7 +1466,7 @@ function createChunks(buffer, chunkSize) {
 }
 
 /**
- * Simple LLM correction using Groq
+ * Simple LLM correction using Groq (for post-processing)
  */
 async function applyLLMCorrection(text, apiKey) {
   try {
@@ -862,7 +1480,7 @@ async function applyLLMCorrection(text, apiKey) {
         model: 'llama-3.1-8b-instant',
         messages: [{
           role: 'user',
-          content: `Please clean up this transcript by fixing obvious speech recognition errors, improving punctuation, and making it more readable while preserving the original meaning and style:\n\n${text}. Do not start with "Here is the cleaned-up transcript:", always start with the transcript.`
+          content: `Fix speech recognition errors, improve punctuation, and make this transcript more readable while preserving the original meaning and style. Output ONLY the corrected transcript with no preamble, introduction, or explanatory text:\n\n${text}`
         }],
         temperature: 0.1,
         max_tokens: 131072
@@ -872,8 +1490,57 @@ async function applyLLMCorrection(text, apiKey) {
     const result = await response.json();
     return result.choices[0].message.content;
   } catch (error) {
-    console.error('LLM correction failed:', error);
+    processingLogger.error('LLM correction failed', error, { 
+      original_length: text?.length || 0 
+    });
     return text; // Return original if correction fails
+  }
+}
+
+/**
+ * Per-chunk LLM correction using Llama 3.1 8B Instant for real-time streaming
+ * Optimized for speed and cost-effectiveness with shorter, focused prompts
+ */
+async function applyPerChunkLLMCorrection(text, apiKey) {
+  try {
+    // Skip LLM for very short chunks (not worth the API call)
+    if (text.trim().length < 10) {
+      return text;
+    }
+    
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 
+        'Authorization': `Bearer ${apiKey}`, 
+        'Content-Type': 'application/json' 
+      },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        messages: [{
+          role: 'user',
+          content: `Fix punctuation and obvious errors in this audio transcript chunk. Output ONLY the corrected text with no preamble or explanatory text:\n\n"${text}"`
+        }],
+        temperature: 0.1,
+        max_tokens: 150, // Smaller limit for chunks
+        stream: false
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`LLM API error: ${response.status}`);
+    }
+    
+    const result = await response.json();
+    const correctedText = result.choices[0].message.content.trim();
+    
+    // Remove quotes if LLM added them
+    return correctedText.replace(/^["']|["']$/g, '');
+    
+  } catch (error) {
+    streamLogger.error('Per-chunk LLM correction failed', error, { 
+      text_length: text?.length || 0 
+    });
+    throw error; // Let the caller handle the error
   }
 }
 
@@ -895,19 +1562,11 @@ async function sendWebhook(webhookUrl, jobId, job) {
       })
     });
   } catch (error) {
-    console.error('Webhook failed:', error);
+    apiLogger.error('Webhook notification failed', error, { 
+      webhook_url: webhookUrl,
+      job_id: jobId 
+    });
   }
-}
-
-/**
- * Format bytes helper
- */
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 // ============================================================================
@@ -948,20 +1607,29 @@ async function handleListJobs(request, env) {
               status: job.status,
               progress: job.progress || 0,
               file_size: job.actual_size || job.size || 0,
-              processing_method: job.actual_size > 15 * 1024 * 1024 ? 'chunked' : 'direct',
+              processing_method: job.processing_method || (job.actual_size > 15 * 1024 * 1024 ? 'chunked' : 'direct'),
+              upload_method: job.source_url ? 'url' : (job.processing_method === 'streaming' ? 'streaming' : 'direct'),
               created_at: job.created_at,
               uploaded_at: job.uploaded_at,
               processing_started_at: job.processing_started_at,
               completed_at: job.completed_at || job.failed_at,
               error: job.error || null,
               use_llm: job.use_llm || false,
+              llm_mode: job.llm_mode || null,
+              chunk_size_mb: job.chunk_size_mb || null,
+              source_url: job.source_url || null,
+              total_segments: job.total_segments || 0,
+              success_rate: job.success_rate || null,
               expires_at: key.expiration ? new Date(key.expiration * 1000).toISOString() : null
             };
             
             jobs.push(jobSummary);
           }
         } catch (error) {
-          console.warn(`Failed to parse job ${key.name}:`, error);
+          apiLogger.warn(`Failed to parse job data`, { 
+            job_key: key.name, 
+            error: error.message 
+          });
         }
       }
     }
@@ -1033,11 +1701,14 @@ async function handleDeleteJob(request, env) {
           Key: job.key 
         });
         await s3Client.send(deleteCmd);
-        console.log(`🗑️ Deleted R2 file: ${job.key}`);
-      } catch (error) {
-        console.warn(`Failed to delete R2 file ${job.key}:`, error.message);
-        // Continue with KV deletion even if R2 deletion fails
-      }
+        apiLogger.info('delete', `Deleted R2 file`, { key: job.key });
+              } catch (error) {
+          apiLogger.warn(`Failed to delete R2 file`, { 
+            key: job.key, 
+            error: error.message 
+          });
+          // Continue with KV deletion even if R2 deletion fails
+        }
     }
     
     // Delete from KV
@@ -1056,6 +1727,82 @@ async function handleDeleteJob(request, env) {
   } catch (error) {
     return new Response(JSON.stringify({ 
       error: 'Failed to delete job', 
+      message: error.message 
+    }), { 
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+/**
+ * Save a completed streaming job to KV storage
+ * This allows streaming jobs to be accessible from other systems (CLI, etc.)
+ */
+async function handleSaveStreamingJob(request, env) {
+  try {
+    const data = await request.json();
+    
+    if (!data.job_id || !data.filename) {
+      return new Response(JSON.stringify({ 
+        error: 'Missing required fields: job_id, filename' 
+      }), { 
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Create a job object compatible with regular jobs
+    const jobData = {
+      job_id: data.job_id,
+      filename: data.filename,
+      status: 'done',
+      file_size: data.file_size || 0,
+      processing_method: 'streaming',
+      upload_method: 'streaming',
+      created_at: data.created_at || new Date().toISOString(),
+      completed_at: data.completed_at || new Date().toISOString(),
+      
+      // Transcription results
+      final_transcript: data.final_transcript || '',
+      raw_transcript: data.raw_transcript || '',
+      corrected_transcript: data.corrected_transcript || '',
+      total_segments: data.total_segments || 0,
+      
+      // Processing settings
+      use_llm: data.use_llm || false,
+      llm_mode: data.llm_mode || 'disabled',
+      chunk_size_mb: data.chunk_size_mb || 1,
+      
+      // Additional metadata
+      progress: 100,
+      source_url: data.source_url || null,
+      
+      // No file key since streaming jobs don't upload files to R2
+      key: null
+    };
+
+    // Save to KV storage
+    await env.GROQ_JOBS_KV.put(data.job_id, JSON.stringify(jobData));
+    
+    apiLogger.info('complete', 'Saved streaming job to KV', { 
+      job_id: data.job_id, 
+      filename: data.filename,
+      transcript_length: data.final_transcript?.length || 0
+    });
+    
+    return new Response(JSON.stringify({
+      message: 'Streaming job saved successfully',
+      job_id: data.job_id
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+  } catch (error) {
+    apiLogger.error('Failed to save streaming job', error);
+    return new Response(JSON.stringify({ 
+      error: 'Failed to save streaming job', 
       message: error.message 
     }), { 
       status: 500,
