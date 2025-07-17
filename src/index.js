@@ -322,12 +322,12 @@ async function handleDirectUpload(request, env) {
     };
     
     await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
-    
-    // Start processing immediately
-    await processFileIntelligently(job_id, env);
+
+    // Queue processing in background instead of awaiting
+    await env.GROQ_PROCESSING_QUEUE.send({ job_id });
     
     return new Response(JSON.stringify({
-      message: 'File uploaded and processing started',
+      message: 'File uploaded and queued for processing',
       job_id,
       filename,
       file_size: fileData.byteLength,
@@ -511,12 +511,12 @@ async function handleUrlUpload(request, env) {
     };
     
     await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
-    
-    // Start processing immediately
-    await processFileIntelligently(job_id, env);
+
+    // Queue processing in background
+    await env.GROQ_PROCESSING_QUEUE.send({ job_id });
     
     return new Response(JSON.stringify({
-      message: 'File downloaded from URL and processing started',
+      message: 'File downloaded from URL and queued for processing',
       job_id,
       filename: extractedFilename,
       source_url: audioUrl,
@@ -631,12 +631,12 @@ async function handleStartProcessing(request, env) {
     job.uploaded_at = new Date().toISOString();
     
     await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
-    
-    // Start intelligent processing
-    await processFileIntelligently(job_id, env);
+
+    // Queue processing
+    await env.GROQ_PROCESSING_QUEUE.send({ job_id });
     
     return new Response(JSON.stringify({ 
-      message: 'File uploaded successfully, processing started',
+      message: 'File uploaded successfully, queued for processing',
       job_id,
       file_size: response.ContentLength,
       processing_method: response.ContentLength > 15 * 1024 * 1024 ? 'chunked' : 'direct'
