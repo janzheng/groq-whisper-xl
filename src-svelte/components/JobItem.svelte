@@ -14,25 +14,32 @@
     processing: 'bg-status-info text-terminal-bg',
     uploaded: 'bg-status-info text-terminal-bg',
     failed: 'bg-status-error text-terminal-bg',
-    done: 'bg-status-success text-terminal-bg'  // Added for completed jobs
+    done: 'bg-status-success text-terminal-bg',  // Added for completed jobs
+    unknown: 'bg-status-warning text-terminal-bg'  // Added for unknown status
   };
   
   const statusIcons = {
     processing: 'mdi:sync',
     uploaded: 'mdi:sync',
     failed: 'mdi:alert-circle',
-    done: 'mdi:check-circle'  // Added for completed jobs
+    done: 'mdi:check-circle',  // Added for completed jobs
+    unknown: 'mdi:help-circle'  // Added for unknown status
   };
   
   function getStatusClass(status) {
-    return statusColors[status] || 'bg-status-warning text-terminal-bg';
+    return statusColors[status?.toLowerCase()] || 'bg-status-warning text-terminal-bg';
   }
   
   function getStatusIcon(status) {
-    return statusIcons[status] || 'mdi:clock';
+    return statusIcons[status?.toLowerCase()] || 'mdi:clock';
   }
   
   function getDisplayStatus(job) {
+    // Safety check for undefined/null status
+    if (!job.status) {
+      return 'UNKNOWN';
+    }
+    
     if (job.status === 'processing' || job.status === 'uploaded') {
       if (job.processing_method === 'streaming') {
         return 'STREAMING';
