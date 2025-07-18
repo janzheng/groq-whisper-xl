@@ -28,7 +28,7 @@
 
 <!-- Full-width Streaming Display (shown when streaming or results should be displayed) -->
 {#if $isStreaming || $showStreamingResults}
-  <div class="border border-terminal-border bg-terminal-bg-light p-4 mb-4">
+  <div class="border-2 border-terminal-border bg-terminal-bg-light p-4 mb-4">
     <div class="font-bold text-center mb-4 border-b border-terminal-border pb-2 flex items-center justify-center gap-2">
       <iconify-icon icon="mdi:waveform" class="text-lg"></iconify-icon> 
       {#if $isStreaming}

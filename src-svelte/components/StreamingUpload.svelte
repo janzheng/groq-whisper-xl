@@ -1,5 +1,5 @@
 <script>
-  import { isStreaming, showStreamingResults, formatBytes, jobs, saveStreamingJobsToStorage, currentStreamingFilename, streamStartTime, streamingProgress, streamingTranscript, chunksProcessed, totalChunks, streamingFileSize, streamingLLMMode } from '../lib/stores.js';
+  import { isStreaming, showStreamingResults, formatBytes, jobs, currentStreamingFilename, streamStartTime, streamingProgress, streamingTranscript, chunksProcessed, totalChunks, streamingFileSize, streamingLLMMode } from '../lib/stores.js';
   import { streamLogger } from '../lib/logger.js';
   import { get } from 'svelte/store';
   import { saveStreamingJob } from '../lib/api.js';
@@ -216,7 +216,6 @@
     // Add to jobs list immediately
     const currentJobs = get(jobs);
     jobs.set([preliminaryStreamingJob, ...currentJobs]);
-    saveStreamingJobsToStorage();
     
     // Create abort controller
     currentAbortController = new AbortController();
@@ -296,7 +295,6 @@
             currentStreamingJob.file_size = data.total_size;
             currentStreamingJob.estimated_chunks = data.estimated_chunks;
             jobs.set(currentJobs);
-            saveStreamingJobsToStorage();
           }
           if (data.total_size) {
             $streamingFileSize = formatBytes(data.total_size);
@@ -315,7 +313,6 @@
           if (currentStreamingJob) {
             currentStreamingJob.progress = data.progress;
             jobs.set(currentJobs);
-            saveStreamingJobsToStorage();
           }
           break;
           
@@ -385,19 +382,48 @@
             completingJob.completed_at = new Date().toISOString();
             completingJob.progress = 100;
             
+            // Add transcripts array to match direct upload format
+            completingJob.transcripts = [{
+              text: data.final_transcript,
+              raw_text: data.raw_transcript,
+              segments: [], // Streaming doesn't provide detailed segments
+              start: 0,
+              duration: completingJob.file_size || 0,
+              chunk_index: 'streaming'
+            }];
+            
             jobs.set(currentJobs);
-            saveStreamingJobsToStorage();  // Even though disabled, keeping for consistency
             
             // Save to server
             try {
               await saveStreamingJob(completingJob);
               streamLogger.info('Saved streaming job to server', { job_id: completingJob.job_id });
               
-              // Trigger jobs refresh from server
-              await fetchJobs();
-              streamLogger.info('Refreshed jobs list after streaming completion');
+              // Trigger multiple jobs refreshes to ensure the update is captured
+              // Sometimes the server needs a moment to fully process the save
+              const refreshAttempts = [500, 1500, 3000]; // Try at 0.5s, 1.5s, and 3s
+              refreshAttempts.forEach((delay, index) => {
+                setTimeout(async () => {
+                  try {
+                    await fetchJobs();
+                    streamLogger.info(`Jobs refresh attempt ${index + 1} completed after streaming`);
+                  } catch (refreshError) {
+                    streamLogger.error(`Jobs refresh attempt ${index + 1} failed after streaming`, refreshError);
+                  }
+                }, delay);
+              });
+              
             } catch (error) {
               streamLogger.error('Failed to save streaming job to server', error);
+              // Still try to refresh even if save failed, in case the job was saved during streaming
+              setTimeout(async () => {
+                try {
+                  await fetchJobs();
+                  streamLogger.info('Attempted jobs refresh after save failure');
+                } catch (refreshError) {
+                  streamLogger.error('Failed to refresh jobs after save failure', refreshError);
+                }
+              }, 1000); // Longer delay for error case
             }
             
             streamLogger.complete('Streaming job completed', {
@@ -424,7 +450,6 @@
             failingJob.error = data.error;
             failingJob.failed_at = new Date().toISOString();
             jobs.set(currentJobs);
-            saveStreamingJobsToStorage();
           }
           break;
     }
@@ -469,8 +494,8 @@
       <button 
         on:click={() => setSourceMode('file')}
         disabled={$isStreaming}
-        class="border border-terminal-border text-terminal-text px-4 py-2 hover:bg-gray-700 transition-colors flex-1 flex items-center justify-center gap-2"
-        class:bg-gray-700={sourceMode === 'file'}
+        class="border border-terminal-border text-terminal-text px-4 py-2 hover:bg-yellow-400 transition-colors flex-1 flex items-center justify-center gap-2"
+        class:bg-yellow-400={sourceMode === 'file'}
         class:bg-terminal-bg={sourceMode !== 'file'}
         class:opacity-50={$isStreaming}
       >
@@ -479,8 +504,8 @@
       <button 
         on:click={() => setSourceMode('url')}
         disabled={$isStreaming}
-        class="border border-terminal-border text-terminal-text px-4 py-2 hover:bg-gray-700 transition-colors flex-1 flex items-center justify-center gap-2"
-        class:bg-gray-700={sourceMode === 'url'}
+        class="border border-terminal-border text-terminal-text px-4 py-2 hover:bg-yellow-400 transition-colors flex-1 flex items-center justify-center gap-2"
+        class:bg-yellow-400={sourceMode === 'url'}
         class:bg-terminal-bg={sourceMode !== 'url'}
         class:opacity-50={$isStreaming}
       >
@@ -530,7 +555,7 @@
         on:change={handleFileSelect}
       >
       
-    {:else if sourceMode === 'url'}
+    {:else}
       <!-- URL input -->
       <input 
         bind:value={url}
@@ -580,14 +605,14 @@
     </div>
   </div>
   
-     <button 
-     on:click={$isStreaming ? stopStreaming : startNewStreaming}
-     class="px-4 py-2 transition-colors w-full font-bold flex items-center justify-center gap-2"
-     class:bg-status-info={!$isStreaming}
-     class:bg-status-error={$isStreaming}
-     class:text-terminal-bg={!$isStreaming || $isStreaming}
-     class:hover:bg-blue-600={!$isStreaming}
-     class:hover:bg-red-600={$isStreaming}
+  <button 
+    on:click={$isStreaming ? stopStreaming : startNewStreaming}
+    class="px-4 py-2 transition-colors w-full font-bold flex items-center justify-center gap-2"
+    class:bg-status-info={!$isStreaming}
+    class:bg-status-error={$isStreaming}
+    class:text-terminal-bg={!$isStreaming || $isStreaming}
+    class:hover:bg-blue-500={!$isStreaming}
+    class:hover:bg-red-600={$isStreaming}
   >
     {#if $isStreaming}
       <iconify-icon icon="mdi:stop"></iconify-icon> Stop Streaming

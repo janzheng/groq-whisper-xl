@@ -29,26 +29,4 @@ export function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-// Save and load streaming jobs from localStorage - DISABLED to fix caching issues
-export function saveStreamingJobsToStorage() {
-  // No-op: localStorage saving disabled to prevent refresh/caching issues
-  // jobs.subscribe(jobList => {
-  //   const streamingJobs = jobList.filter(job => job.processing_method === 'streaming');
-  //   localStorage.setItem('groq_streaming_jobs', JSON.stringify(streamingJobs));
-  //   webLogger.debug('Saved streaming jobs to localStorage', { count: streamingJobs.length });
-  // })();
-}
-
-export function loadStreamingJobsFromStorage() {
-  // No-op: localStorage loading disabled to prevent refresh/caching issues
-  // try {
-  //   const stored = localStorage.getItem('groq_streaming_jobs');
-  //   if (stored) {
-  //     const streamingJobs = JSON.parse(stored);
-  //     jobs.set([...streamingJobs]);
-  //     webLogger.info('stream', 'Loaded streaming jobs from localStorage', { count: streamingJobs.length });
-  //   }
-  // } catch (error) {
-  //   webLogger.warn('Failed to load streaming jobs from localStorage', error);
-  // }
-} 
+// Note: localStorage functions removed - they were disabled and causing no-op calls 

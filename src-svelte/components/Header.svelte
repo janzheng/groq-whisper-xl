@@ -1,5 +1,5 @@
 <!-- CLI Header -->
-<div class="border border-terminal-border bg-terminal-bg-light p-4 mb-4">
+<div class="border-2 border-terminal-border bg-terminal-bg-light p-4 mb-4">
   <div class="flex items-center gap-2 text-lg font-bold">
     <iconify-icon icon="mdi:lightning-bolt" class="text-terminal-accent"></iconify-icon>
     <span class="text-terminal-accent">Groq Whisper XL</span>

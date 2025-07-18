@@ -108,7 +108,7 @@
 
 <div class="border-b border-terminal-border">
   <div 
-    class="p-3 pr-4 hover:bg-gray-800/50 transition-colors cursor-pointer" 
+    class="p-3 pr-4 hover:bg-gray-800/5 transition-colors cursor-pointer" 
     on:click={toggleExpanded}
     on:keydown={(e) => e.key === 'Enter' && toggleExpanded()}
     role="button"
@@ -124,7 +124,7 @@
             <span class="text-status-info text-xs bg-blue-900/30 px-1 rounded">URL</span>
           {/if}
           {#if job.upload_method === 'streaming'}
-            <span class="text-status-info text-xs bg-blue-900/30 px-1 rounded">🌊 Streamed</span>
+            <span class="text-status-info text-xs bg-blue-900/30 px-1 rounded">Streamed</span>
           {/if}
         </div>
         <div class="flex flex-wrap gap-3 text-xs text-terminal-text-dim">
@@ -203,12 +203,12 @@
   
   <!-- Expandable section -->
   {#if expanded}
-    <div class="border-t border-terminal-border bg-gray-900/30 p-3">
+    <div class="border-t border-terminal-border bg-gray-900/5 p-3">
       {#if job.status === 'done'}
         <!-- Completed job: show transcript view -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:items-start">
           <!-- Left column: Job Details + Actions -->
-          <div class="lg:col-span-1">
+          <div class="lg:col-span-1 flex flex-col">
             <div class="text-terminal-accent font-bold mb-2">Job Details</div>
             <div class="space-y-1 text-xs text-terminal-text-dim mb-4">
               <div>ID: {job.job_id}</div>
@@ -240,10 +240,10 @@
           </div>
           
           <!-- Right column: Transcript Display -->
-          <div class="lg:col-span-2">
+          <div class="lg:col-span-2 flex flex-col">
             <div class="text-terminal-accent font-bold mb-2">Full Transcript</div>
-            <div class="border border-terminal-border bg-terminal-bg">
-              <div class="p-3 border-b border-terminal-border font-bold text-terminal-text-dim text-xs">
+            <div class="border border-terminal-border bg-terminal-bg flex flex-col flex-1 min-h-0">
+              <div class="p-3 border-b border-terminal-border font-bold text-terminal-text-dim text-xs flex-shrink-0">
                 <iconify-icon icon="mdi:text-box" class="text-sm"></iconify-icon> 
                 {#if job.processing_method === 'streaming'}
                   Final Transcript (Streaming)
@@ -251,7 +251,7 @@
                   Final Transcript
                 {/if}
               </div>
-                             <div class="p-4 max-h-64 overflow-y-auto font-mono text-sm leading-relaxed">
+                             <div class="p-4 flex-1 overflow-y-auto font-mono text-sm leading-relaxed min-h-[16rem]">
                  {#if job.processing_method === 'streaming'}
                    <!-- For streaming jobs, show the transcript directly from job data -->
                    {#if job.final_transcript}

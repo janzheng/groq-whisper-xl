@@ -36,9 +36,10 @@ export async function fetchJobs() {
             ...serverJob, // Override with server data
             // Preserve any streaming-specific local properties that server might not have
             ...(localJob.processing_method === 'streaming' ? {
-              raw_transcript: localJob.raw_transcript,
-              corrected_transcript: localJob.corrected_transcript,
-              final_transcript: localJob.final_transcript || serverJob.final_transcript
+              raw_transcript: localJob.raw_transcript || serverJob.raw_transcript,
+              corrected_transcript: localJob.corrected_transcript || serverJob.corrected_transcript,
+              final_transcript: localJob.final_transcript || serverJob.final_transcript,
+              transcripts: localJob.transcripts || serverJob.transcripts || []
             } : {})
           });
         } else {
@@ -360,7 +361,8 @@ export async function saveStreamingJob(job) {
         use_llm: job.use_llm,
         llm_mode: job.llm_mode,
         chunk_size_mb: job.chunk_size_mb,
-        source_url: job.source_url || null
+        source_url: job.source_url || null,
+        transcripts: job.transcripts || []
       })
     });
     

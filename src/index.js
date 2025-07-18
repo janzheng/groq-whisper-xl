@@ -146,13 +146,6 @@ export default {
         });
       }
       
-      // Serve CSS file
-      if (url.pathname === '/assets/app.css') {
-        return new Response(STATIC_FILES['/assets/app.css'], {
-          headers: { 'Content-Type': 'text/css' }
-        });
-      }
-      
       // Serve JS file
       if (url.pathname === '/assets/app.js') {
         return new Response(STATIC_FILES['/assets/app.js'], {
@@ -1623,6 +1616,14 @@ async function handleListJobs(request, env) {
               expires_at: key.expiration ? new Date(key.expiration * 1000).toISOString() : null
             };
             
+            // Include transcript data for completed streaming jobs so they persist across reloads
+            if (job.processing_method === 'streaming' && job.status === 'done') {
+              jobSummary.final_transcript = job.final_transcript || '';
+              jobSummary.raw_transcript = job.raw_transcript || '';
+              jobSummary.corrected_transcript = job.corrected_transcript || '';
+              jobSummary.transcripts = job.transcripts || [];
+            }
+            
             jobs.push(jobSummary);
           }
         } catch (error) {
@@ -1768,6 +1769,17 @@ async function handleSaveStreamingJob(request, env) {
       raw_transcript: data.raw_transcript || '',
       corrected_transcript: data.corrected_transcript || '',
       total_segments: data.total_segments || 0,
+      
+      // Add transcripts array to match direct/chunked upload format
+      // Use provided transcripts if available, otherwise create fallback
+      transcripts: data.transcripts && data.transcripts.length > 0 ? data.transcripts : [{
+        text: data.final_transcript || '',
+        raw_text: data.raw_transcript || '',
+        segments: [], // Streaming doesn't provide detailed segments unless passed from client
+        start: 0,
+        duration: data.file_size || 0,
+        chunk_index: 'streaming'
+      }],
       
       // Processing settings
       use_llm: data.use_llm || false,

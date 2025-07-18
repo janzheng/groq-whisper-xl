@@ -87,8 +87,7 @@
   <!-- Jobs Header with Count and Refresh -->
   <div class="flex items-center justify-between py-2 border-b border-terminal-border">
     <div class="flex items-center gap-2">
-      <iconify-icon icon="mdi:briefcase" class="text-status-info"></iconify-icon>
-      <span class="font-bold text-status-info">Jobs ({$jobs.length})</span>
+      <span class="font-bold">Jobs ({$jobs.length})</span>
       {#if hasRunningJobs}
         <span class="text-xs bg-status-info text-terminal-bg px-2 py-1 rounded">
           {$jobs.filter(job => job.status === 'processing' || job.status === 'uploaded' || job.status === 'awaiting_upload').length} Running
@@ -128,7 +127,7 @@
       No jobs yet
     </div>
   {:else}
-    <div class="border border-terminal-border">
+    <div class="border border-x-2 border-terminal-border">
       {#each $jobs as job (job.job_id)}
         <JobItem {job} />
       {/each}

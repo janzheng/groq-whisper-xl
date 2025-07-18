@@ -148,20 +148,36 @@
   
   function setSourceMode(mode) {
     sourceMode = mode;
-    if (mode === 'file') {
-      resetUploadArea();
+    resetUploadArea();
+    url = '';
+  }
+  
+  function getButtonText() {
+    if (sourceMode === 'file') {
+      return selectedFile ? 'Transcribe Audio' : 'Select file first';
+    } else {
+      return url ? 'Transcribe from URL' : 'Enter URL first';
     }
   }
+  
+  function isFormValid() {
+    if (sourceMode === 'file') {
+      return selectedFile !== null;
+    } else {
+      return url.trim() !== '';
+    }
+  }
+  
 </script>
 
 <!-- Direct Upload Section -->
 <div class="border border-terminal-border p-4 flex flex-col">
   <div class="flex items-center gap-2 mb-4 font-bold text-terminal-accent">
-    <iconify-icon icon="mdi:rocket-launch" class="text-lg"></iconify-icon>
-    <span>Direct Upload & Processing</span>
+    <iconify-icon icon="mdi:microphone" class="text-lg"></iconify-icon>
+    <span>Direct Transcription</span>
   </div>
   <div class="text-xs text-terminal-text-dim mb-4">
-    Upload your file and get notified when processing is complete. Files are processed in the background - check "Running Jobs" for progress.
+    Upload files or URLs for complete transcription. Results available when processing is done.
   </div>
   
   <!-- Source Selection -->
@@ -170,16 +186,16 @@
     <div class="flex gap-2 mb-3">
       <button 
         on:click={() => setSourceMode('file')}
-        class="border border-terminal-border text-terminal-text px-4 py-2 hover:bg-gray-700 transition-colors flex-1 flex items-center justify-center gap-2"
-        class:bg-gray-700={sourceMode === 'file'}
+        class="border border-terminal-border text-terminal-text px-4 py-2 hover:bg-yellow-400 transition-colors flex-1 flex items-center justify-center gap-2"
+        class:bg-yellow-400={sourceMode === 'file'}
         class:bg-terminal-bg={sourceMode !== 'file'}
       >
         <iconify-icon icon="mdi:file-outline"></iconify-icon> File
       </button>
       <button 
         on:click={() => setSourceMode('url')}
-        class="border border-terminal-border text-terminal-text px-4 py-2 hover:bg-gray-700 transition-colors flex-1 flex items-center justify-center gap-2"
-        class:bg-gray-700={sourceMode === 'url'}
+        class="border border-terminal-border text-terminal-text px-4 py-2 hover:bg-yellow-400 transition-colors flex-1 flex items-center justify-center gap-2"
+        class:bg-yellow-400={sourceMode === 'url'}
         class:bg-terminal-bg={sourceMode !== 'url'}
       >
         <iconify-icon icon="mdi:web"></iconify-icon> URL
@@ -227,7 +243,7 @@
         on:change={handleFileSelect}
       >
       
-    {:else if sourceMode === 'url'}
+    {:else}
       <!-- URL input -->
       <input 
         bind:value={url}
@@ -267,7 +283,7 @@
   <button 
     on:click={handleDirectProcess}
     disabled={$isUploading}
-    class="bg-terminal-accent text-terminal-bg px-4 py-2 hover:bg-gray-300 transition-colors w-full font-bold flex items-center justify-center gap-2"
+    class="bg-terminal-accent text-terminal-bg px-4 py-2 hover:bg-gray-700 transition-colors w-full font-bold flex items-center justify-center gap-2"
     class:opacity-50={$isUploading}
   >
     <iconify-icon icon="mdi:microphone"></iconify-icon> 
