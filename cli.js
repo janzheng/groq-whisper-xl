@@ -6,6 +6,8 @@ import { basename, extname } from 'path';
 import { createInterface } from 'readline';
 import { promisify } from 'util';
 import { config } from 'dotenv';
+import { LoadingIndicator, ProgressBar, AnimatedText } from './src/ui-helpers.js';
+import { JobManager } from './src/job-manager.js';
 
 // Load environment variables
 config();
@@ -155,152 +157,7 @@ const cliLogger = new UnifiedLogger('CLI', UnifiedLogger.levels.INFO);
 const DEFAULT_BASE_URL = process.env.LOCAL_URL || 'http://localhost:8787';
 const PRODUCTION_URL = process.env.PRODUCTION_URL || 'https://your-worker-name.your-subdomain.workers.dev';
 
-class LoadingIndicator {
-  constructor() {
-    this.spinners = {
-      dots: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-      bounce: ['⠁', '⠂', '⠄', '⡀', '⢀', '⠠', '⠐', '⠈'],
-      pulse: ['◐', '◓', '◑', '◒'],
-      clock: ['🕐', '🕑', '🕒', '🕓', '🕔', '🕕', '🕖', '🕗', '🕘', '🕙', '🕚', '🕛'],
-      wave: ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▇', '▆', '▅', '▄', '▃', '▁'],
-      arrow: ['←', '↖', '↑', '↗', '→', '↘', '↓', '↙'],
-      box: ['▖', '▘', '▝', '▗'],
-      star: ['✦', '✧', '✩', '✪', '✫', '✬', '✭', '✮', '✯', '✰'],
-      earth: ['🌍', '🌎', '🌏'],
-      moon: ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘']
-    };
-    this.currentSpinner = null;
-    this.currentInterval = null;
-    this.currentFrame = 0;
-    this.isActive = false;
-  }
 
-  start(message, type = 'dots', color = '\x1b[36m') {
-    if (this.isActive) {
-      this.stop();
-    }
-
-    this.isActive = true;
-    this.currentFrame = 0;
-    const frames = this.spinners[type] || this.spinners.dots;
-    
-    // Hide cursor
-    process.stdout.write('\x1b[?25l');
-    
-    this.currentInterval = setInterval(() => {
-      const frame = frames[this.currentFrame % frames.length];
-      process.stdout.write(`\r${color}${frame}\x1b[0m ${message}`);
-      this.currentFrame++;
-    }, 100);
-
-    return this;
-  }
-
-  stop(finalMessage = null, symbol = '✅') {
-    if (this.currentInterval) {
-      clearInterval(this.currentInterval);
-      this.currentInterval = null;
-    }
-    
-    if (this.isActive) {
-      // Clear the line and show cursor
-      process.stdout.write('\r' + ' '.repeat(100) + '\r');
-      process.stdout.write('\x1b[?25h');
-      
-      if (finalMessage) {
-        console.log(`${symbol} ${finalMessage}`);
-      }
-    }
-    
-    this.isActive = false;
-    return this;
-  }
-
-  update(message) {
-    if (this.isActive) {
-      // The message will be updated on the next frame
-      this.currentMessage = message;
-    }
-    return this;
-  }
-
-  static async withSpinner(message, asyncFn, type = 'dots') {
-    const loader = new LoadingIndicator();
-    loader.start(message, type);
-    
-    try {
-      const result = await asyncFn();
-      loader.stop();
-      return result;
-    } catch (error) {
-      loader.stop(null, '❌');
-      throw error;
-    }
-  }
-}
-
-class ProgressBar {
-  constructor(total, width = 40) {
-    this.total = total;
-    this.current = 0;
-    this.width = width;
-    this.startTime = Date.now();
-  }
-
-  update(current, message = '') {
-    this.current = current;
-    const percentage = Math.min(100, Math.max(0, (current / this.total) * 100));
-    const filled = Math.round((percentage / 100) * this.width);
-    const empty = this.width - filled;
-    
-    const elapsed = Date.now() - this.startTime;
-    const rate = current / (elapsed / 1000);
-    const eta = current > 0 ? ((this.total - current) / rate) : 0;
-    
-    const bar = '█'.repeat(filled) + '░'.repeat(empty);
-    const stats = `${percentage.toFixed(1)}%`;
-    const speed = rate > 0 ? ` | ${rate.toFixed(1)}/s` : '';
-    const timeLeft = eta > 0 && eta < 3600 ? ` | ETA: ${Math.round(eta)}s` : '';
-    
-    const line = `\r[${bar}] ${stats}${speed}${timeLeft} ${message}`;
-    process.stdout.write(line);
-    
-    return percentage >= 100;
-  }
-
-  finish(message = 'Complete!') {
-    this.update(this.total, message);
-    console.log(); // New line
-  }
-}
-
-class AnimatedText {
-  static typewriter(text, speed = 50) {
-    return new Promise((resolve) => {
-      let i = 0;
-      const interval = setInterval(() => {
-        process.stdout.write(text[i]);
-        i++;
-        if (i >= text.length) {
-          clearInterval(interval);
-          console.log(); // New line
-          resolve();
-        }
-      }, speed);
-    });
-  }
-
-  static rainbow(text) {
-    const colors = ['\x1b[31m', '\x1b[33m', '\x1b[32m', '\x1b[36m', '\x1b[34m', '\x1b[35m'];
-    return text.split('').map((char, i) => 
-      `${colors[i % colors.length]}${char}\x1b[0m`
-    ).join('');
-  }
-
-  static glow(text) {
-    return `\x1b[1m\x1b[93m${text}\x1b[0m`;
-  }
-}
 
 class GroqWhisperCLI {
   constructor() {
@@ -309,6 +166,7 @@ class GroqWhisperCLI {
       input: process.stdin,
       output: process.stdout
     });
+    this.jobManager = new JobManager(this.baseUrl, this);
   }
 
   async question(prompt) {
@@ -446,7 +304,7 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}`);
 │   1. 📤 Direct Upload (Recommended)                         │
 │   2. 🌐 URL Upload (From web)                               │
 │   3. 🔧 Presigned Upload (Advanced)                         │
-│   4. 🌊 Streaming Upload (Real-time results)               │
+│   4. 🌊 Streaming Upload (Real-time results)                │
 │                                                             │
 │ Job Management:                                             │
 │   5. 📋 List Jobs                                           │
@@ -479,16 +337,19 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}`);
     switch (choice.trim()) {
       case '1':
         this.baseUrl = DEFAULT_BASE_URL;
+        this.jobManager.baseUrl = this.baseUrl;
         console.log(`✅ Endpoint set to: ${this.baseUrl}`);
         break;
       case '2':
         this.baseUrl = PRODUCTION_URL;
+        this.jobManager.baseUrl = this.baseUrl;
         console.log(`✅ Endpoint set to: ${this.baseUrl}`);
         break;
       case '3':
         const customUrl = await this.question('Enter custom URL: ');
         if (customUrl.trim()) {
           this.baseUrl = customUrl.trim().replace(/\/$/, ''); // Remove trailing slash
+          this.jobManager.baseUrl = this.baseUrl;
           console.log(`✅ Endpoint set to: ${this.baseUrl}`);
         }
         break;
@@ -673,7 +534,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       console.log(`⚙️  Processing method: ${result.processing_method}`);
 
       // Monitor progress
-      await this.monitorJob(result.job_id, true);
+      await this.jobManager.monitorJob(result.job_id, true);
 
     } catch (error) {
       loader.stop();
@@ -769,7 +630,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       console.log(`⚙️  Processing method: ${result.processing_method}`);
 
       // Monitor progress
-      await this.monitorJob(result.job_id, true);
+      await this.jobManager.monitorJob(result.job_id, true);
 
     } catch (error) {
       loader.stop();
@@ -893,95 +754,14 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       console.log(`⚙️  Processing method: ${startResult.processing_method}`);
 
       // Monitor progress
-      await this.monitorJob(presignResult.job_id, true);
+      await this.jobManager.monitorJob(presignResult.job_id, true);
 
     } catch (error) {
       console.log(`❌ Error: ${error.message}`);
     }
   }
 
-  async monitorJob(jobId, autoShowResults = false) {
-    console.log(`\n📊 ${AnimatedText.glow('Monitoring job:')} ${jobId}`);
-    console.log('Press Ctrl+C to stop monitoring (job will continue in background)\n');
 
-    const startTime = Date.now();
-    let lastStatus = '';
-    let spinner = null;
-
-    while (true) {
-      try {
-        const response = await fetch(`${this.baseUrl}/status?job_id=${jobId}`);
-        const status = await response.json();
-
-        if (!response.ok) {
-          if (spinner) spinner.stop();
-          console.log(`❌ Error checking status: ${status.error || 'Unknown error'}`);
-          break;
-        }
-
-        const elapsed = this.formatDuration(Date.now() - startTime);
-        const progress = status.progress || 0;
-        
-        // Use different spinner types based on status
-        const spinnerType = {
-          'uploaded': 'pulse',
-          'processing': 'dots',
-          'done': 'star',
-          'failed': 'box'
-        }[status.status] || 'dots';
-
-        const statusColors = {
-          'uploaded': '\x1b[33m',  // Yellow
-          'processing': '\x1b[36m', // Cyan
-          'done': '\x1b[32m',      // Green
-          'failed': '\x1b[31m'     // Red
-        };
-
-        // If status changed, restart spinner
-        if (status.status !== lastStatus) {
-          if (spinner) spinner.stop();
-          
-          if (status.status === 'processing') {
-            spinner = new LoadingIndicator();
-            spinner.start(`🔄 Processing... ${progress}% | Elapsed: ${elapsed}`, spinnerType, statusColors[status.status]);
-          } else if (status.status === 'uploaded') {
-            spinner = new LoadingIndicator();
-            spinner.start(`📁 File uploaded, waiting to start... | Elapsed: ${elapsed}`, spinnerType, statusColors[status.status]);
-          }
-        } else if (spinner && status.status === 'processing') {
-          // Update the spinner message with current progress
-          spinner.stop();
-          spinner.start(`🔄 Processing... ${progress}% | Elapsed: ${elapsed}`, spinnerType, statusColors[status.status]);
-        }
-
-        if (status.status === 'done') {
-          if (spinner) spinner.stop();
-          
-          // Show completion animation
-          console.log('\n🎉 ' + AnimatedText.rainbow('Processing completed successfully!'));
-          
-          if (autoShowResults) {
-            await this.getJobResults(jobId);
-          } else {
-            console.log(`\nTo get results, use option 6 with job ID: ${jobId}`);
-          }
-          break;
-        } else if (status.status === 'failed') {
-          if (spinner) spinner.stop();
-          console.log(`\n\n❌ Processing failed: ${status.error || 'Unknown error'}`);
-          break;
-        }
-
-        lastStatus = status.status;
-        await this.sleep(1000); // Check every second for more responsive updates
-
-      } catch (error) {
-        if (spinner) spinner.stop();
-        console.log(`\n❌ Error monitoring job: ${error.message}`);
-        break;
-      }
-    }
-  }
 
   createProgressBar(progress, width = 30) {
     const filled = Math.round((progress / 100) * width);
@@ -1117,7 +897,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     }
   }
   
-    async processStreamingResponse(response) {
+  async processStreamingResponse(response) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     
@@ -1333,219 +1113,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     }
   }
 
-  async listJobs() {
-    console.log(`\n📋 Listing Jobs\n`);
-    
-    const limit = await this.question('Number of jobs to show (default 20): ');
-    const statusFilter = await this.question('Filter by status (done/processing/failed, or press Enter for all): ');
 
-    try {
-      let url = `${this.baseUrl}/jobs`;
-      const params = new URLSearchParams();
-      
-      if (limit.trim() && !isNaN(limit.trim())) {
-        params.append('limit', limit.trim());
-      } else {
-        params.append('limit', '20');
-      }
-      
-      if (statusFilter.trim()) {
-        params.append('status', statusFilter.trim());
-      }
-
-      if (params.toString()) {
-        url += '?' + params.toString();
-      }
-
-      const loader = new LoadingIndicator();
-      loader.start('📋 Fetching job list...', 'dots', '\x1b[36m');
-
-      const response = await fetch(url);
-      const result = await response.json();
-      
-      loader.stop();
-
-      if (!response.ok) {
-        console.log(`❌ Error: ${result.error || 'Unknown error'}`);
-        return;
-      }
-
-      if (result.jobs.length === 0) {
-        console.log('📭 No jobs found');
-        return;
-      }
-
-      console.log(`\n📊 Showing ${result.showing} of ${result.total} jobs:\n`);
-
-      // Table header
-      console.log('┌─────────────────────────────────────┬──────────────────┬───────────┬──────────┬──────────────┬─────────────────────┐');
-      console.log('│ Job ID                              │ Filename         │ Status    │ Progress │ File Size    │ Created             │');
-      console.log('├─────────────────────────────────────┼──────────────────┼───────────┼──────────┼──────────────┼─────────────────────┤');
-
-      for (const job of result.jobs) {
-        const jobId = job.job_id.substring(0, 35);
-        const filename = (job.filename || 'Unknown').substring(0, 15);
-        const status = job.status.substring(0, 10);
-        const progress = `${job.progress || 0}%`.padStart(7);
-        const fileSize = this.formatBytes(job.file_size || 0).substring(0, 11);
-        const created = new Date(job.created_at).toLocaleString().substring(0, 18);
-
-        console.log(`│ ${jobId.padEnd(35)} │ ${filename.padEnd(15)} │ ${status.padEnd(9)} │ ${progress} │ ${fileSize.padEnd(11)} │ ${created.padEnd(18)} │`);
-      }
-
-      console.log('└─────────────────────────────────────┴──────────────────┴───────────┴──────────┴──────────────┴─────────────────────┘');
-
-      if (result.filters) {
-        console.log(`\nFilters applied: ${JSON.stringify(result.filters)}`);
-      }
-
-    } catch (error) {
-      if (typeof loader !== 'undefined') loader.stop();
-      console.log(`❌ Error: ${error.message}`);
-    }
-  }
-
-  async checkJobStatus() {
-    console.log(`\n📊 Check Job Status\n`);
-    
-    const jobId = await this.question('Enter job ID: ');
-    if (!jobId.trim()) {
-      console.log('❌ Job ID is required');
-      return;
-    }
-
-    await this.monitorJob(jobId.trim(), false);
-  }
-
-  async getJobResults(jobId = null) {
-    if (!jobId) {
-      console.log(`\n📄 Get Job Results\n`);
-      jobId = await this.question('Enter job ID: ');
-      if (!jobId.trim()) {
-        console.log('❌ Job ID is required');
-        return;
-      }
-      jobId = jobId.trim();
-    }
-
-    try {
-      const loader = new LoadingIndicator();
-      loader.start('📄 Fetching transcription results...', 'wave', '\x1b[32m');
-      
-      const response = await fetch(`${this.baseUrl}/result?job_id=${jobId}`);
-      const result = await response.json();
-      
-      loader.stop();
-
-      if (!response.ok) {
-        if (result.error === 'Not ready') {
-          console.log(`⏳ Job not ready yet. Status: ${result.status}, Progress: ${result.progress}%`);
-          const monitor = await this.question('Monitor progress? (y/N): ');
-          if (monitor.toLowerCase().startsWith('y')) {
-            await this.monitorJob(jobId, true);
-          }
-        } else {
-          console.log(`❌ Error: ${result.error || 'Unknown error'}`);
-        }
-        return;
-      }
-
-      console.log('\n🎉 Transcription Results:\n');
-
-      // Show final transcript
-      console.log('📝 Final Transcript:');
-      console.log('─'.repeat(80));
-      console.log(result.final || 'No transcript available');
-      console.log('─'.repeat(80));
-
-      // Show partial results if available
-      if (result.partials && result.partials.length > 1) {
-        console.log(`\n📊 Processing Details (${result.partials.length} chunks):`);
-        
-        for (let i = 0; i < result.partials.length; i++) {
-          const partial = result.partials[i];
-          console.log(`\nChunk ${i + 1}:`);
-          
-          // Handle cases where text might be undefined/null (failed chunks)
-          if (partial.text) {
-            console.log(`  Text: ${partial.text.substring(0, 100)}${partial.text.length > 100 ? '...' : ''}`);
-          } else {
-            console.log(`  Text: [Chunk processing failed - no transcript available]`);
-          }
-          
-          if (partial.segments && partial.segments.length > 0) {
-            console.log(`  Segments: ${partial.segments.length}`);
-            console.log(`  Duration: ${partial.segments[0].start}s - ${partial.segments[partial.segments.length - 1].end}s`);
-          }
-        }
-      }
-
-      // Ask to save results
-      const save = await this.question('\nSave transcript to file? (Y/n): ');
-      if (save.trim() === '' || save.toLowerCase().startsWith('y')) {
-        const filename = await this.question('Enter filename (default: transcript.txt): ');
-        const outputFile = filename.trim() || 'transcript.txt';
-        
-        try {
-          const fs = await import('fs');
-          fs.writeFileSync(outputFile, result.final || 'No transcript available');
-          console.log(`✅ Transcript saved to: ${outputFile}`);
-        } catch (error) {
-          console.log(`❌ Error saving file: ${error.message}`);
-        }
-      }
-
-    } catch (error) {
-      if (typeof loader !== 'undefined') loader.stop();
-      console.log(`❌ Error: ${error.message}`);
-    }
-  }
-
-  async deleteJob() {
-    console.log(`\n🗑️ Delete Job\n`);
-    
-    const jobId = await this.question('Enter job ID to delete: ');
-    if (!jobId.trim()) {
-      console.log('❌ Job ID is required');
-      return;
-    }
-
-    const confirm = await this.question(`⚠️  Are you sure you want to delete job ${jobId.trim()}? This will remove the job and its files. (y/N): `);
-    if (!confirm.toLowerCase().startsWith('y')) {
-      console.log('❌ Deletion cancelled');
-      return;
-    }
-
-    try {
-      const loader = new LoadingIndicator();
-      loader.start('🗑️ Deleting job and cleaning up files...', 'box', '\x1b[31m');
-      
-      const response = await fetch(`${this.baseUrl}/delete-job`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId.trim() })
-      });
-
-      const result = await response.json();
-      loader.stop();
-
-      if (!response.ok) {
-        console.log(`❌ Error: ${result.error || 'Unknown error'}`);
-        return;
-      }
-
-      console.log('✅ Job deleted successfully');
-      console.log(`📋 Job ID: ${result.job_id}`);
-      console.log(`📁 Filename: ${result.filename}`);
-      if (result.deleted_file) {
-        console.log(`🗑️ Deleted file: ${result.deleted_file}`);
-      }
-
-    } catch (error) {
-      if (typeof loader !== 'undefined') loader.stop();
-      console.log(`❌ Error: ${error.message}`);
-    }
-  }
 
   getContentType(extension) {
     const contentTypes = {
@@ -1584,16 +1152,16 @@ Video: MP4, MPEG, WEBM (audio track extracted)
             await this.streamingUpload();
             break;
           case '5':
-            await this.listJobs();
+            await this.jobManager.listJobs();
             break;
           case '6':
-            await this.checkJobStatus();
+            await this.jobManager.checkJobStatus();
             break;
           case '7':
-            await this.getJobResults();
+            await this.jobManager.getJobResults();
             break;
           case '8':
-            await this.deleteJob();
+            await this.jobManager.deleteJob();
             break;
           case '9':
             await this.changeEndpoint();
