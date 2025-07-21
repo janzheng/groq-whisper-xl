@@ -4,9 +4,165 @@ import { STATIC_FILES } from './static-web.js';
 import { apiLogger, processingLogger, formatBytes } from './core/logger.js';
 import { handleStreamingTranscription, transcribeChunk } from './core/streaming.js';
 
+// Chunked Upload Streaming imports
+import {
+  handleChunkedUploadStream,
+  handleChunkedUploadStatus,
+  handleChunkedUploadCancel,
+  handleChunkedUploadRetry,
+  handleChunkedStream,
+  handleChunkedStreamOptions,
+  handleChunkUploadComplete,
+  handleBatchChunkUploadComplete,
+  handleChunkedUploadQueue,
+  enhanceJobListing
+} from './chunked-streaming/index.js';
+
 // ============================================================================
 // MAIN CLOUDFLARE WORKER EXPORT
 // ============================================================================
+
+/**
+ * Handle chunk upload through Worker (avoids CORS issues)
+ * POST /chunk-upload
+ * Content-Type: multipart/form-data
+ * - chunk: File blob
+ * - parent_job_id: string
+ * - chunk_index: number
+ * - expected_size: number
+ */
+async function handleChunkUpload(request, env) {
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    
+    if (!contentType.includes('multipart/form-data')) {
+      return new Response(JSON.stringify({
+        error: 'Content-Type must be multipart/form-data'
+      }), { 
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const formData = await request.formData();
+    const chunk = formData.get('chunk');
+    const parent_job_id = formData.get('parent_job_id');
+    const chunk_index = parseInt(formData.get('chunk_index'));
+    const expected_size = parseInt(formData.get('expected_size') || '0');
+
+    if (!chunk || !parent_job_id || chunk_index === undefined) {
+      return new Response(JSON.stringify({
+        error: 'Missing required fields: chunk, parent_job_id, chunk_index'
+      }), { 
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const chunkData = await chunk.arrayBuffer();
+    const actual_size = chunkData.byteLength;
+
+    // Validate chunk size if expected_size provided
+    if (expected_size > 0 && actual_size !== expected_size) {
+      apiLogger.warn('Chunk size mismatch', {
+        parent_job_id,
+        chunk_index,
+        expected_size,
+        actual_size
+      });
+    }
+
+    // Store chunk in R2
+    const bucketName = env.R2_BUCKET_NAME || (env.ENVIRONMENT === 'development' ? 'groq-whisper-audio-preview' : 'groq-whisper-audio');
+    const s3Client = createS3Client(env);
+    
+    // Get the filename extension from the parent job to maintain consistency
+    let ext = 'mp3';
+    try {
+      const parentJobData = await env.GROQ_JOBS_KV.get(parent_job_id);
+      if (parentJobData) {
+        const parentJob = JSON.parse(parentJobData);
+        ext = parentJob.filename?.split('.').pop() || 'mp3';
+      }
+    } catch (error) {
+      apiLogger.warn('Could not get parent job for file extension', { parent_job_id });
+    }
+
+    const key = `uploads/${parent_job_id}/chunk.${chunk_index}.${ext}`;
+    
+    const putCmd = new PutObjectCommand({
+      Bucket: bucketName,
+      Key: key,
+      Body: chunkData,
+      ContentType: 'audio/*'
+    });
+    
+    await s3Client.send(putCmd);
+
+    apiLogger.info('upload', `Chunk ${chunk_index} uploaded via Worker`, {
+      parent_job_id,
+      chunk_index,
+      actual_size: formatBytes(actual_size),
+      key
+    });
+
+    // Automatically trigger processing completion notification
+    try {
+      const completeResult = await handleChunkUploadComplete(
+        new Request('http://localhost/chunk-upload-complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            parent_job_id,
+            chunk_index,
+            actual_size
+          })
+        }),
+        env
+      );
+
+      // Extract the response data
+      const completeData = await completeResult.json();
+
+      return new Response(JSON.stringify({
+        message: 'Chunk uploaded and processing started',
+        parent_job_id,
+        chunk_index,
+        actual_size,
+        key,
+        processing_result: completeData
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+    } catch (processingError) {
+      apiLogger.error('Failed to start chunk processing after upload', processingError);
+      
+      return new Response(JSON.stringify({
+        message: 'Chunk uploaded but processing failed to start',
+        parent_job_id,
+        chunk_index,
+        actual_size,
+        key,
+        processing_error: processingError.message
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+  } catch (error) {
+    apiLogger.error('Chunk upload failed', error);
+    return new Response(JSON.stringify({
+      error: 'Chunk upload failed',
+      message: error.message
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
 
 export default {
   async fetch(request, env) {
@@ -65,6 +221,28 @@ export default {
       return handleHealth(request, env);
     }
     
+    // Chunked Upload Streaming API
+    else if (url.pathname === '/chunked-upload-stream' && request.method === 'POST') {
+      return handleChunkedUploadStream(request, env);
+    } else if (url.pathname === '/chunked-upload-status' && request.method === 'GET') {
+      return handleChunkedUploadStatus(request, env);
+    } else if (url.pathname === '/chunked-upload-cancel' && request.method === 'POST') {
+      return handleChunkedUploadCancel(request, env);
+    } else if (url.pathname === '/chunked-upload-retry' && request.method === 'POST') {
+      return handleChunkedUploadRetry(request, env);
+    } else if (url.pathname === '/chunk-upload' && request.method === 'POST') {
+      return handleChunkUpload(request, env);
+    } else if (url.pathname === '/chunk-upload-complete' && request.method === 'POST') {
+      return handleChunkUploadComplete(request, env);
+    } else if (url.pathname === '/chunks-upload-complete' && request.method === 'POST') {
+      return handleBatchChunkUploadComplete(request, env);
+    } else if (url.pathname.startsWith('/chunked-stream/') && request.method === 'GET') {
+      const parent_job_id = url.pathname.split('/chunked-stream/')[1];
+      return handleChunkedStream(request, env, parent_job_id);
+    } else if (url.pathname.startsWith('/chunked-stream/') && request.method === 'OPTIONS') {
+      return handleChunkedStreamOptions(request);
+    }
+    
     // For any other GET request, serve the main page (SPA fallback)
     if (request.method === 'GET') {
       return new Response(STATIC_FILES['/'], {
@@ -77,7 +255,18 @@ export default {
 
   async queue(batch, env) {
     for (const msg of batch.messages) {
-      await processJob(msg.body.job_id, env);
+      const messageBody = msg.body;
+      
+      // Handle different queue message types
+      if (messageBody.job_id && !messageBody.parent_job_id) {
+        // Regular job processing
+        await processJob(messageBody.job_id, env);
+      } else if (messageBody.parent_job_id && messageBody.sub_job_id) {
+        // Chunked upload streaming job processing
+        await handleChunkedUploadQueue({ messages: [{ body: messageBody }] }, env);
+      } else {
+        apiLogger.warn('Unknown queue message format', { messageBody });
+      }
     }
   },
 };
@@ -1046,7 +1235,22 @@ async function handleListJobs(request, env) {
               jobSummary.transcripts = job.transcripts || [];
             }
             
-            jobs.push(jobSummary);
+            // Include transcript data for completed chunked upload streaming jobs
+            if (job.type === 'chunked_upload_streaming' && job.status === 'done') {
+              jobSummary.final_transcript = job.final_transcript || '';
+              jobSummary.raw_transcript = job.raw_transcript || '';
+              jobSummary.corrected_transcript = job.corrected_transcript || '';
+              jobSummary.transcripts = job.transcripts || [];
+              jobSummary.total_chunks = job.total_chunks || 0;
+              jobSummary.completed_chunks = job.completed_chunks || 0;
+              jobSummary.failed_chunks = job.failed_chunks || 0;
+              jobSummary.upload_progress = job.upload_progress || 0;
+              jobSummary.processing_progress = job.processing_progress || 0;
+            }
+            
+            // Enhance job summary for chunked upload streaming
+            const enhancedJobSummary = enhanceJobListing(jobSummary);
+            jobs.push(enhancedJobSummary);
           }
         } catch (error) {
           apiLogger.warn(`Failed to parse job data`, { 

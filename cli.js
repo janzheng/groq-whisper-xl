@@ -305,22 +305,23 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}`);
 │   2. 🌐 URL Upload (From web)                               │
 │   3. 🔧 Presigned Upload (Advanced)                         │
 │   4. 🌊 Streaming Upload (Real-time results)                │
+│   5. ⚡ Chunked Upload Streaming (Large files, fastest)     │
 │                                                             │
 │ Job Management:                                             │
-│   5. 📋 List Jobs                                           │
-│   6. 📊 Check Job Status                                    │
-│   7. 📄 Get Job Results                                     │
-│   8. 🗑️  Delete Job                                          │
+│   6. 📋 List Jobs                                           │
+│   7. 📊 Check Job Status                                    │
+│   8. 📄 Get Job Results                                     │
+│   9. 🗑️  Delete Job                                          │
 │                                                             │
 │ Settings:                                                   │
-│   9. ⚙️  Change Endpoint                                     │
-│  10. ❓ Help & Examples                                     │
-│  11. 🌐 Test Connectivity                                   │
+│  10. ⚙️  Change Endpoint                                     │
+│  11. ❓ Help & Examples                                     │
+│  12. 🌐 Test Connectivity                                   │
 │   0. 🚪 Exit                                                │
 └─────────────────────────────────────────────────────────────┘
 `);
 
-    const choice = await this.question('Choose an option (0-11): ');
+    const choice = await this.question('Choose an option (0-12): ');
     return choice.trim();
   }
 
@@ -448,6 +449,11 @@ Current endpoint: ${AnimatedText.glow(this.baseUrl)}`);
 4. Streaming Upload (Real-time)
    • Best for: Testing, real-time feedback, development
    • Complexity: ⭐ Simple
+
+5. Chunked Upload Streaming (Large files, fastest)
+   • Best for: Large files (>5MB), fastest time to first result
+   • Complexity: ⭐⭐ Advanced
+   • Parallel chunk upload and processing with real-time streaming
    • Processes audio in tiny chunks with live results
 
 💡 Pro Tips:
@@ -481,7 +487,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     console.log(`📁 File: ${filename}`);
     console.log(`📊 Size: ${this.formatBytes(fileSize)}`);
     console.log(`🎯 Processing tier: ${fileSize <= 15 * 1024 * 1024 ? 'Standard' : fileSize <= 100 * 1024 * 1024 ? 'Advanced' : 'Enterprise'}`);
-    const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
+    const useLLM = await this.question('\nEnable LLM correction for better quality? (y/N): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
     // Check connectivity before proceeding
@@ -505,7 +511,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       });
       
       formData.append('file', blob, filename);
-      formData.append('use_llm', useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y') ? 'true' : 'false');
+      formData.append('use_llm', useLLM.toLowerCase().startsWith('y') ? 'true' : 'false');
       
       if (webhookUrl.trim()) {
         formData.append('webhook_url', webhookUrl.trim());
@@ -552,7 +558,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     }
 
     const filename = await this.question('Custom filename (optional, press Enter to auto-detect): ');
-    const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
+    const useLLM = await this.question('\nEnable LLM correction for better quality? (y/N): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
     // Check connectivity before proceeding
@@ -565,7 +571,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     try {
       const payload = {
         url: url.trim(),
-        use_llm: useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y'),
+        use_llm: useLLM.toLowerCase().startsWith('y'),
       };
 
       if (filename.trim()) {
@@ -670,7 +676,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     console.log(`📁 File: ${filename}`);
     console.log(`📊 Size: ${this.formatBytes(fileSize)}`);
 
-    const useLLM = await this.question('\nEnable LLM correction for better quality? (Y/n): ');
+    const useLLM = await this.question('\nEnable LLM correction for better quality? (y/N): ');
     const webhookUrl = await this.question('Webhook URL (optional, press Enter to skip): ');
 
     // Check connectivity before proceeding
@@ -687,7 +693,7 @@ Video: MP4, MPEG, WEBM (audio track extracted)
       const payload = {
         filename,
         size: fileSize,
-        use_llm: useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y'),
+        use_llm: useLLM.toLowerCase().startsWith('y'),
       };
 
       if (webhookUrl.trim()) {
@@ -813,16 +819,16 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     
     // Streaming settings
     const chunkSizeMB = await this.question('Chunk size in MB (default 0.25MB for fast streaming): ');
-    const useLLM = await this.question('Enable LLM correction? (Y/n): ');
+    const useLLM = await this.question('Enable LLM correction? (y/N): ');
     
     let llmMode = 'per_chunk';
-    if (useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y')) {
+    if (useLLM.toLowerCase().startsWith('y')) {
       const mode = await this.question('LLM mode:\n1. Per-chunk (real-time, faster)\n2. Post-process (full context, slower)\nChoose (1-2, default 1): ');
       llmMode = mode.trim() === '2' ? 'post_process' : 'per_chunk';
     }
     
     const finalChunkSize = parseFloat(chunkSizeMB.trim()) || 0.25;
-    const enableLLM = useLLM.trim() === '' || useLLM.toLowerCase().startsWith('y');
+    const enableLLM = useLLM.toLowerCase().startsWith('y');
     
     console.log(`\n⚙️  Settings:`);
     console.log(`   • Chunk size: ${finalChunkSize}MB`);
@@ -1113,7 +1119,425 @@ Video: MP4, MPEG, WEBM (audio track extracted)
     }
   }
 
+  async chunkedUploadStreaming() {
+    console.log(`\n⚡ Chunked Upload Streaming (Large files, fastest)\n`);
+    console.log('📖 This method uploads large files in chunks with parallel processing');
+    console.log('💡 Perfect for large files - get the first transcription results immediately!\n');
+    
+    // Get file path
+    const filePath = await this.question('Enter file path: ');
+    
+    if (!existsSync(filePath)) {
+      console.log('❌ File not found');
+      return;
+    }
 
+    const stats = statSync(filePath);
+    const fileSize = stats.size;
+    const filename = basename(filePath);
+    const minSize = 5 * 1024 * 1024; // 5MB minimum
+    
+    console.log(`📁 File: ${filename}`);
+    console.log(`📊 Size: ${this.formatBytes(fileSize)}`);
+    
+    if (fileSize < minSize) {
+      console.log(`⚠️  File is smaller than 5MB. Consider using regular streaming upload (option 4) for better performance.`);
+      const proceed = await this.question('Continue anyway? (y/N): ');
+      if (!proceed.toLowerCase().startsWith('y')) {
+        return;
+      }
+    }
+    
+    // Chunked upload settings
+    const chunkSizeMB = await this.question('Chunk size in MB (default 5MB, range 1-100): ');
+    const useLLM = await this.question('Enable LLM correction? (y/N): ');
+    
+    let llmMode = 'per_chunk';
+    if (useLLM.toLowerCase().startsWith('y')) {
+      const mode = await this.question('LLM mode:\n1. Per-chunk (real-time, faster)\n2. Post-process (full context, slower)\nChoose (1-2, default 1): ');
+      llmMode = mode.trim() === '2' ? 'post_process' : 'per_chunk';
+    }
+    
+    const finalChunkSize = Math.max(1, Math.min(100, parseFloat(chunkSizeMB.trim()) || 5));
+    const enableLLM = useLLM.toLowerCase().startsWith('y');
+    const maxConcurrentUploads = 3; // Safe default for parallel uploads
+    
+    console.log(`\n⚙️  Settings:`);
+    console.log(`   • Chunk size: ${finalChunkSize}MB`);
+    console.log(`   • LLM correction: ${enableLLM ? 'Enabled' : 'Disabled'}`);
+    if (enableLLM) {
+      console.log(`   • LLM mode: ${llmMode === 'per_chunk' ? 'Per-chunk (real-time)' : 'Post-process (full context)'}`);
+    }
+    console.log(`   • Max concurrent uploads: ${maxConcurrentUploads}`);
+    console.log(`   • Processing: Parallel chunks with real-time streaming\n`);
+
+    // Check connectivity before proceeding
+    if (!(await this.checkConnectivityBeforeOperation())) {
+      return;
+    }
+
+    try {
+      console.log('🚀 Initializing chunked upload streaming...\n');
+      
+      // Step 1: Initialize chunked upload session
+      const initResponse = await fetch(`${this.baseUrl}/chunked-upload-stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename,
+          total_size: fileSize,
+          chunk_size_mb: finalChunkSize,
+          use_llm: enableLLM,
+          llm_mode: llmMode,
+          max_concurrent_uploads: maxConcurrentUploads
+        })
+      });
+      
+      if (!initResponse.ok) {
+        const errorText = await initResponse.text();
+        console.log(`❌ Initialization failed: ${errorText}`);
+        return;
+      }
+      
+      const { parent_job_id, upload_urls, stream_url, chunk_info } = await initResponse.json();
+      
+      console.log(`✅ Session initialized successfully!`);
+      console.log(`📋 Job ID: ${parent_job_id}`);
+      console.log(`🧩 Total chunks: ${chunk_info.total_chunks}`);
+      console.log(`⏱️  Estimated time: ${chunk_info.estimated_processing_time}\n`);
+      
+      // Step 2: Start SSE stream for real-time updates
+      console.log('🌊 Opening real-time stream...\n');
+      const streamPromise = this.handleChunkedStream(stream_url, parent_job_id);
+      
+      // Step 3: Upload chunks in parallel
+      console.log('📤 Starting parallel chunk uploads...\n');
+      const uploadPromise = this.uploadChunksInParallel(filePath, upload_urls, parent_job_id, maxConcurrentUploads);
+      
+      // Wait for both streaming and uploading to complete
+      await Promise.all([streamPromise, uploadPromise]);
+      
+    } catch (error) {
+      console.log(`❌ Error: ${error.message}`);
+    }
+  }
+
+  async handleChunkedStream(streamUrl, parentJobId) {
+    try {
+      const response = await fetch(`${this.baseUrl}${streamUrl}`, {
+        method: 'GET',
+        headers: { 'Accept': 'text/event-stream' }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Stream failed: ${response.status}`);
+      }
+      
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullTranscript = '';
+      let lastPartialTranscript = '';
+      const startTime = Date.now();
+      let firstResultTime = null;
+      let completedChunks = 0;
+      let totalChunks = 0;
+      
+      console.log('📡 Real-time stream connected!\n');
+      
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) {
+            console.log('\n🔚 Stream ended');
+            break;
+          }
+          
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+          
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                await this.handleChunkedStreamEvent(data, {
+                  fullTranscript,
+                  lastPartialTranscript,
+                  startTime,
+                  firstResultTime,
+                  completedChunks,
+                  totalChunks,
+                  parentJobId
+                });
+                
+                // Update context variables
+                if (data.type === 'initialized') {
+                  totalChunks = data.total_chunks;
+                }
+                if (data.type === 'chunk_complete') {
+                  completedChunks++;
+                  if (!firstResultTime) {
+                    firstResultTime = Date.now();
+                    const timeToFirst = ((firstResultTime - startTime) / 1000).toFixed(1);
+                    console.log(`\n⚡ First result in ${timeToFirst}s! (${((completedChunks / totalChunks) * 100).toFixed(1)}% complete)\n`);
+                  }
+                }
+                if (data.type === 'partial_transcript') {
+                  lastPartialTranscript = data.partial_transcript;
+                }
+                if (data.type === 'final_result') {
+                  fullTranscript = data.final_transcript;
+                }
+                
+              } catch (parseError) {
+                continue; // Skip invalid JSON
+              }
+            }
+          }
+        }
+        
+        // Show final summary
+        if (fullTranscript) {
+          const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+          const timeToFirst = firstResultTime ? ((firstResultTime - startTime) / 1000).toFixed(1) : 'N/A';
+          
+          console.log(`\n📊 Final Summary:`);
+          console.log(`   • Total time: ${totalTime}s`);
+          console.log(`   • Time to first result: ${timeToFirst}s`);
+          console.log(`   • Transcript length: ${fullTranscript.length} characters`);
+          console.log(`   • Chunks processed: ${completedChunks}/${totalChunks}\n`);
+          
+          // Ask to save transcript
+          try {
+            const save = await this.question('Save transcript to file? (Y/n): ');
+            if (save.trim() === '' || save.toLowerCase().startsWith('y')) {
+              const outputFilename = await this.question('Enter filename (default: chunked_transcript.txt): ');
+              const outputFile = outputFilename.trim() || 'chunked_transcript.txt';
+              
+              const fs = await import('fs');
+              fs.writeFileSync(outputFile, fullTranscript);
+              console.log(`✅ Transcript saved to: ${outputFile}`);
+            }
+          } catch (readlineError) {
+            // Auto-save if readline is closed
+            console.log(`💾 Auto-saving transcript...`);
+            const fs = await import('fs');
+            fs.writeFileSync('chunked_transcript.txt', fullTranscript);
+            console.log(`✅ Transcript auto-saved to: chunked_transcript.txt`);
+          }
+        }
+        
+      } catch (streamError) {
+        console.log(`❌ Stream error: ${streamError.message}`);
+      }
+      
+    } catch (error) {
+      console.log(`❌ Failed to connect to stream: ${error.message}`);
+    }
+  }
+
+  async handleChunkedStreamEvent(data, context) {
+    const { type } = data;
+    
+    switch (type) {
+      case 'initialized':
+        console.log(`📋 Session ready: ${data.filename}`);
+        console.log(`🧩 Will process ${data.total_chunks} chunks`);
+        console.log(`⚙️  Processing options: ${JSON.stringify(data.processing_options)}\n`);
+        break;
+        
+      case 'progress_update':
+        const uploadPct = data.upload_progress || 0;
+        const processPct = data.processing_progress || 0;
+        process.stdout.write(`\r📊 Progress: Upload ${uploadPct}% | Processing ${processPct}% | Completed ${data.completed_chunks}/${data.completed_chunks + data.failed_chunks + (data.uploaded_chunks - data.completed_chunks - data.failed_chunks)} chunks`);
+        break;
+        
+      case 'chunk_complete':
+        const timeElapsed = ((Date.now() - context.startTime) / 1000).toFixed(1);
+        process.stdout.write(`\n✅ Chunk ${data.chunk_index + 1} completed (${timeElapsed}s)`);
+        if (data.text) {
+          if (data.llm_applied) {
+            console.log(`\n   📝 Raw: "${data.raw_text}"`);
+            console.log(`   🧠 LLM: "${data.corrected_text}"`);
+          } else {
+            console.log(`\n   📝 "${data.text}"`);
+          }
+        }
+        break;
+        
+      case 'chunk_failed':
+        console.log(`\n❌ Chunk ${data.chunk_index + 1} failed: ${data.error}`);
+        break;
+        
+      case 'partial_transcript':
+        if (data.partial_transcript && data.partial_transcript !== context.lastPartialTranscript) {
+          console.log(`\n🔄 Partial transcript (${data.available_chunks}/${data.total_chunks} chunks):`);
+          console.log(`"${data.partial_transcript}"\n`);
+        }
+        break;
+        
+      case 'assembly_start':
+        console.log(`\n🔧 Assembling final transcript from ${data.completed_chunks} chunks...`);
+        break;
+        
+      case 'assembly_complete':
+        console.log(`✅ Assembly completed: ${data.successful_chunks}/${data.total_chunks} chunks successful`);
+        break;
+        
+      case 'llm_processing':
+        console.log(`\n🧠 ${data.message || 'Applying LLM corrections...'}`);
+        break;
+        
+      case 'llm_done':
+        console.log(`✅ LLM correction completed (${data.mode || 'unknown'} mode)`);
+        break;
+        
+      case 'llm_error':
+        console.log(`❌ LLM correction failed: ${data.error} (using fallback)`);
+        break;
+        
+      case 'final_result':
+        console.log(`\n🎉 Chunked upload streaming completed!`);
+        console.log(`📊 Final stats:`);
+        console.log(`   • Status: ${data.status}`);
+        console.log(`   • Total chunks: ${data.total_chunks}`);
+        console.log(`   • Successful: ${data.successful_chunks}`);
+        console.log(`   • Failed: ${data.failed_chunks}`);
+        console.log(`   • Success rate: ${data.success_rate}%`);
+        if (data.processing_stats) {
+          console.log(`   • Processing time: ${(data.processing_stats.total_processing_time / 1000).toFixed(1)}s`);
+        }
+        console.log(`\n📝 Final transcript:`);
+        console.log(`"${data.final_transcript}"\n`);
+        break;
+        
+      case 'job_terminated':
+        console.log(`\n⚠️  Job terminated: ${data.status}`);
+        console.log(`📋 Reason: ${data.reason}`);
+        if (data.partial_results) {
+          console.log(`📝 Partial results available (${data.partial_results.completed_chunks} chunks)`);
+        }
+        break;
+        
+      case 'stream_timeout':
+        console.log(`\n⏰ Stream timeout (${data.duration_minutes} minutes)`);
+        console.log(`💡 ${data.suggestion}`);
+        break;
+        
+      case 'stream_error':
+        if (data.recoverable) {
+          console.log(`\n⚠️  Stream error (recoverable): ${data.error}`);
+        } else {
+          console.log(`\n❌ Stream error: ${data.error}`);
+        }
+        break;
+        
+      case 'error':
+        console.log(`\n❌ Error: ${data.error}`);
+        break;
+        
+      default:
+        // Debug: show unknown events
+        console.log(`\n📨 ${type}: ${JSON.stringify(data).slice(0, 100)}...`);
+    }
+  }
+
+  async uploadChunksInParallel(filePath, uploadUrls, parentJobId, maxConcurrent) {
+    const fs = await import('fs');
+    const fileHandle = await fs.promises.open(filePath, 'r');
+    
+    console.log(`📤 Uploading ${uploadUrls.length} chunks (max ${maxConcurrent} concurrent)...\n`);
+    
+    try {
+      // Create semaphore for concurrency control
+      let currentConcurrent = 0;
+      const uploadPromises = uploadUrls.map(async (urlInfo, index) => {
+        // Wait for available slot
+        while (currentConcurrent >= maxConcurrent) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        currentConcurrent++;
+        
+        try {
+          // Read chunk data
+          const chunkSize = urlInfo.byte_range[1] - urlInfo.byte_range[0] + 1;
+          const buffer = Buffer.alloc(chunkSize);
+          const { bytesRead } = await fileHandle.read(buffer, 0, chunkSize, urlInfo.byte_range[0]);
+          
+          if (bytesRead === 0) {
+            throw new Error(`No data read for chunk ${urlInfo.chunk_index}`);
+          }
+          
+          const actualChunkData = buffer.slice(0, bytesRead);
+          
+          console.log(`📤 Uploading chunk ${urlInfo.chunk_index + 1}/${uploadUrls.length} (${this.formatBytes(bytesRead)})...`);
+          
+          // Upload chunk
+          const uploadResponse = await fetch(urlInfo.upload_url, {
+            method: 'PUT',
+            body: actualChunkData,
+            headers: {
+              'Content-Type': 'audio/*',
+              'Content-Length': bytesRead.toString()
+            }
+          });
+          
+          if (!uploadResponse.ok) {
+            throw new Error(`Upload failed: ${uploadResponse.status} ${uploadResponse.statusText}`);
+          }
+          
+          console.log(`✅ Chunk ${urlInfo.chunk_index + 1} uploaded successfully`);
+          
+          // Notify upload completion
+          const completeResponse = await fetch(`${this.baseUrl}/chunk-upload-complete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              parent_job_id: parentJobId,
+              chunk_index: urlInfo.chunk_index,
+              actual_size: bytesRead
+            })
+          });
+          
+          if (!completeResponse.ok) {
+            const errorText = await completeResponse.text();
+            throw new Error(`Failed to notify upload completion: ${errorText}`);
+          }
+          
+          console.log(`🔄 Chunk ${urlInfo.chunk_index + 1} processing started`);
+          
+        } catch (error) {
+          console.log(`❌ Chunk ${urlInfo.chunk_index + 1} failed: ${error.message}`);
+          throw error;
+        } finally {
+          currentConcurrent--;
+        }
+      });
+      
+      // Wait for all uploads to complete
+      const results = await Promise.allSettled(uploadPromises);
+      
+      const successful = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
+      
+      console.log(`\n📊 Upload Summary:`);
+      console.log(`   • Successful: ${successful}/${uploadUrls.length}`);
+      console.log(`   • Failed: ${failed}/${uploadUrls.length}`);
+      console.log(`   • Success rate: ${((successful / uploadUrls.length) * 100).toFixed(1)}%\n`);
+      
+      if (failed > 0) {
+        console.log(`⚠️  Some chunks failed to upload. Processing will continue with available chunks.`);
+      }
+      
+    } finally {
+      await fileHandle.close();
+    }
+  }
 
   getContentType(extension) {
     const contentTypes = {
@@ -1152,24 +1576,27 @@ Video: MP4, MPEG, WEBM (audio track extracted)
             await this.streamingUpload();
             break;
           case '5':
-            await this.jobManager.listJobs();
+            await this.chunkedUploadStreaming();
             break;
           case '6':
-            await this.jobManager.checkJobStatus();
+            await this.jobManager.listJobs();
             break;
           case '7':
-            await this.jobManager.getJobResults();
+            await this.jobManager.checkJobStatus();
             break;
           case '8':
-            await this.jobManager.deleteJob();
+            await this.jobManager.getJobResults();
             break;
           case '9':
-            await this.changeEndpoint();
+            await this.jobManager.deleteJob();
             break;
           case '10':
-            await this.showHelp();
+            await this.changeEndpoint();
             break;
           case '11':
+            await this.showHelp();
+            break;
+          case '12':
             await this.testConnectivity();
             break;
           case '0':

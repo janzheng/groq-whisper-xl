@@ -374,4 +374,220 @@ export async function saveStreamingJob(job) {
   } catch (error) {
     webLogger.error('Failed to save streaming job to server', error);
   }
+}
+
+// ============================================================================
+// CHUNKED STREAMING API FUNCTIONS
+// ============================================================================
+
+export async function initializeChunkedUpload(options) {
+  const {
+    filename,
+    file,
+    url,
+    chunkSizeMB = 5,
+    useLLM = false,
+    llmMode = 'per_chunk',
+    webhookUrl = null
+  } = options;
+
+  let totalSize;
+  
+  // Determine total size based on input type
+  if (file) {
+    totalSize = file.size;
+  } else if (url) {
+    // For URLs, we'll let the server determine size
+    // This is a placeholder - you might want to fetch HEAD first for size
+    totalSize = 0; // Server will determine actual size
+  } else {
+    throw new Error('Either file or url must be provided');
+  }
+
+  const payload = {
+    filename: filename || (file ? file.name : url.split('/').pop()),
+    total_size: totalSize,
+    chunk_size_mb: chunkSizeMB,
+    use_llm: useLLM,
+    llm_mode: llmMode,
+    webhook_url: webhookUrl
+  };
+
+  const response = await fetch(API_BASE + '/chunked-upload-stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to initialize chunked upload');
+  }
+
+  const result = await response.json();
+  
+  // Add to jobs list immediately
+  const currentJobs = get(jobs);
+  const newJob = {
+    job_id: result.parent_job_id,
+    filename: payload.filename,
+    status: 'uploading',
+    file_size: totalSize,
+    processing_method: 'chunked_upload_streaming',
+    upload_method: 'chunked_streaming',
+    use_llm: useLLM,
+    llm_mode: llmMode,
+    chunk_size_mb: chunkSizeMB,
+    total_chunks: result.chunk_info.total_chunks,
+    uploaded_chunks: 0,
+    completed_chunks: 0,
+    failed_chunks: 0,
+    created_at: new Date().toISOString(),
+    type: 'chunked_upload_streaming'
+  };
+  
+  jobs.set([newJob, ...currentJobs]);
+  
+  return {
+    ...result,
+    job: newJob
+  };
+}
+
+export async function uploadChunksInParallel(file, uploadUrls, parentJobId, maxConcurrent = 3) {
+  console.log('uploadChunksInParallel called:', {
+    fileSize: file.size,
+    uploadUrlsLength: uploadUrls?.length,
+    parentJobId,
+    maxConcurrent
+  });
+
+  if (!uploadUrls || uploadUrls.length === 0) {
+    throw new Error('No upload URLs provided');
+  }
+
+  const uploadPromises = uploadUrls.map(async (urlInfo, index) => {
+    console.log(`Starting upload for chunk ${index}:`, {
+      chunkIndex: urlInfo.chunk_index,
+      byteRange: urlInfo.byte_range,
+      uploadUrl: urlInfo.upload_url,
+      parentJobId: urlInfo.parent_job_id
+    });
+
+    // Extract chunk data from file
+    const chunkStart = urlInfo.byte_range[0];
+    const chunkEnd = urlInfo.byte_range[1] + 1; // byte_range is inclusive, slice is exclusive
+    const chunk = file.slice(chunkStart, chunkEnd);
+    
+    console.log(`Chunk ${index} data:`, {
+      chunkIndex: urlInfo.chunk_index,
+      chunkSize: chunk.size,
+      expectedStart: chunkStart,
+      expectedEnd: chunkEnd
+    });
+    
+    try {
+      // Upload chunk to Worker (instead of directly to R2)
+      console.log(`Uploading chunk ${urlInfo.chunk_index} to Worker...`);
+      
+      const formData = new FormData();
+      formData.append('chunk', chunk, `chunk.${urlInfo.chunk_index}`);
+      formData.append('parent_job_id', parentJobId);
+      formData.append('chunk_index', urlInfo.chunk_index.toString());
+      formData.append('expected_size', urlInfo.expected_size.toString());
+      
+      const uploadResponse = await fetch(API_BASE + urlInfo.upload_url, {
+        method: 'POST',
+        body: formData
+      });
+      
+      console.log(`Chunk ${urlInfo.chunk_index} upload response:`, {
+        status: uploadResponse.status,
+        statusText: uploadResponse.statusText,
+        ok: uploadResponse.ok
+      });
+      
+      if (!uploadResponse.ok) {
+        const errorData = await uploadResponse.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(`Upload failed: ${uploadResponse.status} ${uploadResponse.statusText} - ${errorData.error || 'Unknown error'}`);
+      }
+      
+      const responseData = await uploadResponse.json();
+      console.log(`Chunk ${urlInfo.chunk_index} completed successfully:`, responseData);
+      
+      return {
+        chunkIndex: urlInfo.chunk_index,
+        success: true,
+        size: chunk.size,
+        response: responseData
+      };
+      
+    } catch (error) {
+      console.error(`Chunk ${urlInfo.chunk_index} failed:`, error);
+      return {
+        chunkIndex: urlInfo.chunk_index,
+        success: false,
+        error: error.message
+      };
+    }
+  });
+  
+  console.log(`Starting ${uploadPromises.length} concurrent uploads...`);
+  
+  // Use Promise.allSettled to handle concurrent uploads with some failures
+  const results = await Promise.allSettled(uploadPromises);
+  
+  console.log('All upload promises settled:', results);
+  
+  const finalResults = results.map(result => 
+    result.status === 'fulfilled' ? result.value : {
+      success: false,
+      error: result.reason?.message || 'Upload failed'
+    }
+  );
+  
+  console.log('Final upload results:', finalResults);
+  
+  return finalResults;
+}
+
+export async function createChunkedStreamEventSource(parentJobId) {
+  const eventSource = new EventSource(`${API_BASE}/chunked-stream/${parentJobId}`);
+  return eventSource;
+}
+
+export async function retryChunkUpload(parentJobId, chunkIndex) {
+  const response = await fetch(API_BASE + '/chunked-upload-retry', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      parent_job_id: parentJobId,
+      chunk_index: chunkIndex
+    })
+  });
+  
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to retry chunk upload');
+  }
+  
+  return await response.json();
+}
+
+export async function cancelChunkedUpload(parentJobId) {
+  const response = await fetch(API_BASE + '/chunked-upload-cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      parent_job_id: parentJobId,
+      reason: 'user_cancelled'
+    })
+  });
+  
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to cancel chunked upload');
+  }
+  
+  return await response.json();
 } 
