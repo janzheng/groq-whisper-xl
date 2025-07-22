@@ -9,6 +9,9 @@
   let transcript = '';
   let fetchingTranscript = false;
   let transcriptFetched = false;
+  let showDebugChunks = false;
+  let debugChunks = [];
+  let loadingDebugChunks = false;
   
   const statusColors = {
     processing: 'bg-status-info text-terminal-bg',
@@ -109,6 +112,63 @@
     // Fetch transcript when expanding a completed regular job
     if (expanded && job.status === 'done' && job.processing_method !== 'streaming') {
       fetchTranscript();
+    }
+  }
+
+  // Auto-fetch transcript when job status changes to 'done' for direct uploads
+  // This handles cases where user expands job while it's still processing,
+  // then the job completes - we want to automatically show the transcript
+  $: if (expanded && job.status === 'done' && job.processing_method !== 'streaming' && !transcriptFetched && !fetchingTranscript) {
+    fetchTranscript();
+  }
+
+  async function handleViewDebugChunks() {
+    if (loadingDebugChunks || showDebugChunks) {
+      showDebugChunks = !showDebugChunks;
+      return;
+    }
+
+    loadingDebugChunks = true;
+    try {
+      // Use different parameter based on job type
+      const param = job.processing_method === 'chunked_upload_streaming' ? 'parent_job_id' : 'job_id';
+      const response = await fetch(`/debug/chunks?${param}=${job.job_id}`);
+      if (response.ok) {
+        const data = await response.json();
+        debugChunks = data.debug_chunks || [];
+        showDebugChunks = true;
+      } else {
+        alert('Failed to load debug chunks');
+      }
+    } catch (error) {
+      console.error('Failed to load debug chunks:', error);
+      alert('Error loading debug chunks: ' + error.message);
+    } finally {
+      loadingDebugChunks = false;
+    }
+  }
+
+  async function handleDownloadDebugChunk(chunkIndex) {
+    try {
+      // Use different parameter based on job type
+      const param = job.processing_method === 'chunked_upload_streaming' ? 'parent_job_id' : 'job_id';
+      const response = await fetch(`/debug/chunk?${param}=${job.job_id}&chunk_index=${chunkIndex}`);
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `debug_chunk_${job.job_id}_${chunkIndex}.${job.filename?.split('.').pop() || 'mp3'}`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } else {
+        alert('Failed to download debug chunk');
+      }
+    } catch (error) {
+      console.error('Failed to download debug chunk:', error);
+      alert('Error downloading debug chunk: ' + error.message);
     }
   }
 </script>
@@ -243,6 +303,69 @@
               >
                 <iconify-icon icon="mdi:code-json" class="text-xs"></iconify-icon> Copy JSON
               </button>
+              
+              <!-- Debug chunks section -->
+              {#if job.debug_save_chunks}
+                <div class="border-t border-terminal-border pt-2 mt-2">
+                  <div class="text-terminal-text font-bold mb-2 text-xs flex items-center gap-2">
+                    🐛 Debug Chunks
+                    {#if debugChunks.length > 0}
+                      <span class="bg-green-600 text-white px-1 py-0.5 rounded text-xs">
+                        {debugChunks.length} saved
+                      </span>
+                    {/if}
+                  </div>
+                  
+                  {#if showDebugChunks && debugChunks.length > 0}
+                    <!-- Show direct links to chunks -->
+                    <div class="space-y-1 mb-2">
+                      {#each debugChunks as chunk}
+                        <div class="bg-terminal-bg-light border border-terminal-border p-2 text-xs">
+                          <div class="flex items-center justify-between mb-1">
+                            <span class="font-bold text-terminal-text">
+                              Chunk {chunk.chunk_index}
+                              {#if chunk.is_playable}
+                                <span class="text-green-400">✓ Playable</span>
+                              {:else}
+                                <span class="text-yellow-400">⚠ May not play</span>
+                              {/if}
+                            </span>
+                            <span class="text-terminal-text-dim">
+                              {formatBytes(chunk.actual_size || chunk.audio_data_size)}
+                            </span>
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <a 
+                              href="/debug/chunk?{job.processing_method === 'chunked_upload_streaming' ? 'parent_job_id' : 'job_id'}={job.job_id}&chunk_index={chunk.chunk_index}"
+                              target="_blank"
+                              class="text-terminal-accent hover:text-yellow-400 transition-colors text-xs flex items-center gap-1"
+                            >
+                              <iconify-icon icon="mdi:download" class="text-xs"></iconify-icon>
+                              Download
+                            </a>
+                            {#if chunk.chunking_method}
+                              <span class="text-terminal-text-dim text-xs">
+                                ({chunk.chunking_method})
+                              </span>
+                            {/if}
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                  
+                  <button 
+                    on:click={handleViewDebugChunks}
+                    class="bg-terminal-bg-light border border-terminal-border text-terminal-text px-2 py-1 text-xs hover:bg-gray-700 transition-colors flex items-center gap-1 w-full"
+                  >
+                    <iconify-icon icon="mdi:folder-download" class="text-xs"></iconify-icon> 
+                    {showDebugChunks ? 'Hide Debug Chunks' : 'View Debug Chunks'}
+                    {#if loadingDebugChunks}
+                      <iconify-icon icon="mdi:loading" class="text-xs animate-spin"></iconify-icon>
+                    {/if}
+                  </button>
+                </div>
+              {/if}
             </div>
           </div>
           
@@ -281,6 +404,14 @@
                      <pre class="whitespace-pre-wrap text-terminal-text">{transcript}</pre>
                    {:else if transcriptFetched}
                      <div class="text-terminal-text-dim italic">No transcript available</div>
+                   {:else if job.status === 'processing' || job.status === 'uploaded'}
+                     <div class="text-terminal-text-dim italic flex items-center gap-2">
+                       <iconify-icon icon="mdi:clock-processing" class="animate-pulse"></iconify-icon>
+                       Transcript will be available when processing completes...
+                       {#if job.progress}
+                         <span class="text-terminal-accent">({job.progress}% complete)</span>
+                       {/if}
+                     </div>
                    {:else}
                      <div class="text-terminal-text-dim italic">
                        Transcript will load when expanded
@@ -301,6 +432,9 @@
               <div>Status: {job.status}</div>
               <div>Upload: {job.upload_method || 'direct'}</div>
               <div>Processing: {job.processing_method || 'direct'}</div>
+              {#if job.model}
+                <div>Model: {job.model}</div>
+              {/if}
             </div>
           </div>
           
@@ -316,6 +450,8 @@
           </div>
         </div>
       {/if}
+      
+
     </div>
   {/if}
 </div> 

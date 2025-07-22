@@ -3,6 +3,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { apiLogger, formatBytes } from '../../core/logger.js';
 import { ParentJobManager } from './parent-job-manager.js';
 import { SubJobProcessor } from './sub-job-processor.js';
+import { withJobSpawnLimits, withChunkProcessingLimits } from '../../core/rate-limiter.js';
 
 /**
  * Upload Coordinator for Chunked Upload Streaming
@@ -175,24 +176,46 @@ export class UploadCoordinator {
    * Create sub-jobs for all chunks
    */
   async createSubJobs(parent_job_id, filename, chunkPlan) {
-    const subJobs = [];
+    return await withJobSpawnLimits(async () => {
+      const subJobs = [];
+      const subJobIds = [];
 
-    for (const chunk of chunkPlan) {
-      const subJob = await this.subJobProcessor.createSubJob({
+      // First, create all sub-jobs without linking them to parent yet
+      for (const chunk of chunkPlan) {
+        const subJob = await this.subJobProcessor.createSubJob({
+          parent_job_id,
+          chunk_index: chunk.chunk_index,
+          chunk_range: [chunk.start, chunk.end],
+          filename,
+          size: chunk.size
+        });
+
+        subJobs.push(subJob);
+        
+        // Ensure we have the right array size and order
+        while (subJobIds.length <= chunk.chunk_index) {
+          subJobIds.push(null);
+        }
+        subJobIds[chunk.chunk_index] = subJob.job_id;
+      }
+
+      // Now atomically update parent job with all sub-job IDs at once
+      const parentJob = await this.parentJobManager.getParentJob(parent_job_id);
+      parentJob.sub_jobs = subJobIds;
+      await this.parentJobManager.kv.put(parent_job_id, JSON.stringify(parentJob), { expirationTtl: 86400 });
+
+      apiLogger.info('create', 'Created and linked all sub-jobs atomically', {
         parent_job_id,
-        chunk_index: chunk.chunk_index,
-        chunk_range: [chunk.start, chunk.end],
-        filename,
-        size: chunk.size
+        total_sub_jobs: subJobs.length,
+        sub_job_ids: subJobIds.filter(id => id !== null)
       });
 
-      // Link sub-job to parent
-      await this.parentJobManager.addSubJob(parent_job_id, subJob.job_id, chunk.chunk_index);
-      
-      subJobs.push(subJob);
-    }
-
-    return subJobs;
+      return subJobs;
+    }, {
+      parent_job_id,
+      total_chunks: chunkPlan.length,
+      operation: 'upload_coordinator_sub_job_creation'
+    });
   }
 
   /**
@@ -203,19 +226,44 @@ export class UploadCoordinator {
       // Update parent job upload progress
       await this.parentJobManager.updateChunkUploaded(parent_job_id, chunk_index);
 
-      // Get sub-job for this chunk
-      const parentJob = await this.parentJobManager.getParentJob(parent_job_id);
-      const sub_job_id = parentJob.sub_jobs[chunk_index]; // Should match chunk index
+      // Get sub-job for this chunk with retry logic for race conditions
+      let sub_job_id;
+      let parentJob;
+      let retryCount = 0;
+      const maxRetries = 3;
+      const retryDelay = 1000; // 1 second
 
-      if (!sub_job_id) {
-        throw new Error(`Sub-job not found for chunk ${chunk_index}. Available sub-jobs: ${parentJob.sub_jobs.length}, chunk_index: ${chunk_index}`);
-      }
-      
-      // Additional validation: verify the sub-job actually exists
-      try {
-        await this.subJobProcessor.getSubJob(sub_job_id);
-      } catch (error) {
-        throw new Error(`Sub-job ${sub_job_id} for chunk ${chunk_index} not found in KV storage: ${error.message}`);
+      while (retryCount < maxRetries) {
+        try {
+          parentJob = await this.parentJobManager.getParentJob(parent_job_id);
+          sub_job_id = parentJob.sub_jobs[chunk_index];
+
+          if (!sub_job_id) {
+            throw new Error(`Sub-job not found for chunk ${chunk_index}. Available sub-jobs: ${parentJob.sub_jobs.length}, chunk_index: ${chunk_index}, sub_jobs: [${parentJob.sub_jobs.map((id, i) => `${i}:${id ? 'exists' : 'null'}`).join(', ')}]`);
+          }
+          
+          // Additional validation: verify the sub-job actually exists
+          await this.subJobProcessor.getSubJob(sub_job_id);
+          break; // Success, exit retry loop
+
+        } catch (error) {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            // Final attempt failed
+            throw new Error(`Failed to find sub-job for chunk ${chunk_index} after ${maxRetries} retries. Latest error: ${error.message}`);
+          }
+          
+          // Log retry attempt
+          apiLogger.warn(`Retrying sub-job lookup for chunk ${chunk_index} (attempt ${retryCount}/${maxRetries})`, {
+            parent_job_id,
+            chunk_index,
+            error: error.message,
+            available_sub_jobs: parentJob?.sub_jobs?.length || 0
+          });
+          
+          // Wait before retry to allow for KV propagation
+          await new Promise(resolve => setTimeout(resolve, retryDelay * retryCount));
+        }
       }
 
       // Mark sub-job as uploaded
@@ -240,26 +288,33 @@ export class UploadCoordinator {
         }
       }
       
-      // If queue failed or not available, process directly
+      // If queue failed or not available, process directly with rate limiting
       if (!processingQueued) {
-        try {
-          // Import the processor function for direct processing
-          const { processChunkUpload } = await import('../handlers/chunk-upload-complete-handler.js');
-          
-          // Process directly and await completion to ensure proper error handling
-          await processChunkUpload(parent_job_id, sub_job_id, chunk_index, this.env);
-          
-          processingMethod = 'direct';
-          apiLogger.info('upload', `Chunk ${chunk_index} upload completed, processing directly`, {
-            parent_job_id,
-            sub_job_id,
-            chunk_index,
-            actual_size: formatBytes(actual_size)
-          });
-        } catch (error) {
-          apiLogger.error('Failed to start direct processing', error);
-          throw new Error(`Failed to process chunk ${chunk_index}: ${error.message}`);
-        }
+        await withChunkProcessingLimits(async () => {
+          try {
+            // Import the processor function for direct processing
+            const { processChunkUpload } = await import('../handlers/chunk-upload-complete-handler.js');
+            
+            // Process directly and await completion to ensure proper error handling
+            await processChunkUpload(parent_job_id, sub_job_id, chunk_index, this.env);
+            
+            processingMethod = 'direct';
+            apiLogger.info('upload', `Chunk ${chunk_index} upload completed, processing directly`, {
+              parent_job_id,
+              sub_job_id,
+              chunk_index,
+              actual_size: formatBytes(actual_size)
+            });
+          } catch (error) {
+            apiLogger.error('Failed to start direct processing', error);
+            throw new Error(`Failed to process chunk ${chunk_index}: ${error.message}`);
+          }
+        }, {
+          parent_job_id,
+          sub_job_id,
+          chunk_index,
+          operation: 'direct_chunk_processing'
+        });
       } else {
         apiLogger.info('upload', `Chunk ${chunk_index} upload completed, processing queued`, {
           parent_job_id,
@@ -296,6 +351,9 @@ export class UploadCoordinator {
       
       // Get detailed status for each chunk
       const chunkStatuses = [];
+      let missingSubJobs = 0;
+      let kvLookupErrors = 0;
+      
       for (let i = 0; i < parentJob.total_chunks; i++) {
         const sub_job_id = parentJob.sub_jobs[i];
         if (sub_job_id) {
@@ -303,29 +361,50 @@ export class UploadCoordinator {
             const subJob = await this.subJobProcessor.getSubJob(sub_job_id);
             chunkStatuses.push({
               chunk_index: i,
+              sub_job_id,
               status: subJob.status,
               uploaded_at: subJob.uploaded_at,
               processing_started_at: subJob.processing_started_at,
               completed_at: subJob.completed_at,
-              error: subJob.error
+              error: subJob.error,
+              retry_count: subJob.retry_count || 0,
+              processing_time: subJob.processing_time || null,
+              transcript_length: subJob.final_transcript?.length || 0
             });
           } catch (error) {
+            kvLookupErrors++;
             chunkStatuses.push({
               chunk_index: i,
-              status: 'error',
-              error: 'Sub-job not found'
+              sub_job_id,
+              status: 'kv_error',
+              error: `Sub-job lookup failed: ${error.message}`,
+              timestamp: new Date().toISOString()
             });
           }
         } else {
+          missingSubJobs++;
           chunkStatuses.push({
             chunk_index: i,
-            status: 'pending',
+            sub_job_id: null,
+            status: 'missing_sub_job',
+            error: 'Sub-job ID not found in parent job',
             uploaded_at: null,
             processing_started_at: null,
             completed_at: null
           });
         }
       }
+
+      // Calculate diagnostic metrics
+      const statusCounts = chunkStatuses.reduce((counts, chunk) => {
+        counts[chunk.status] = (counts[chunk.status] || 0) + 1;
+        return counts;
+      }, {});
+
+      const completedChunks = chunkStatuses.filter(c => c.status === 'done').length;
+      const processingChunks = chunkStatuses.filter(c => c.status === 'processing').length;
+      const failedChunks = chunkStatuses.filter(c => c.status === 'failed' || c.status === 'kv_error').length;
+      const pendingChunks = chunkStatuses.filter(c => c.status === 'pending' || c.status === 'missing_sub_job').length;
 
       return {
         parent_job_id,
@@ -337,10 +416,57 @@ export class UploadCoordinator {
         uploaded_chunks: parentJob.uploaded_chunks,
         completed_chunks: parentJob.completed_chunks,
         failed_chunks: parentJob.failed_chunks,
+        
+        // Enhanced diagnostics
+        diagnostics: {
+          sub_jobs_array_length: parentJob.sub_jobs?.length || 0,
+          missing_sub_jobs: missingSubJobs,
+          kv_lookup_errors: kvLookupErrors,
+          status_breakdown: statusCounts,
+          actual_completed: completedChunks,
+          actual_processing: processingChunks,
+          actual_failed: failedChunks,
+          actual_pending: pendingChunks,
+          coordination_health: {
+            sub_jobs_properly_linked: (parentJob.sub_jobs?.length || 0) === parentJob.total_chunks,
+            no_missing_sub_jobs: missingSubJobs === 0,
+            no_kv_errors: kvLookupErrors === 0,
+            counts_match: completedChunks === parentJob.completed_chunks
+          },
+          retry_info: {
+            chunks_needing_retry: chunkStatuses.filter(c => 
+              c.status === 'failed' || c.status === 'kv_error' || c.status === 'missing_sub_job'
+            ).map(c => ({
+              chunk_index: c.chunk_index,
+              status: c.status,
+              error: c.error,
+              retry_count: c.retry_count || 0,
+              error_type: c.error_type,
+              recommended_retry_type: this.getRecommendedRetryType(c)
+            })),
+            total_retryable_chunks: chunkStatuses.filter(c => 
+              c.status === 'failed' || c.status === 'kv_error' || c.status === 'missing_sub_job'
+            ).length,
+            chunks_with_high_retry_count: chunkStatuses.filter(c => 
+              (c.retry_count || 0) >= 3
+            ).length
+          }
+        },
+        
         chunk_statuses: chunkStatuses,
         created_at: parentJob.created_at,
         processing_started_at: parentJob.processing_started_at,
-        first_chunk_completed_at: parentJob.first_chunk_completed_at
+        first_chunk_completed_at: parentJob.first_chunk_completed_at,
+        
+        // Timing analysis
+        timing_analysis: {
+          session_duration: Date.now() - new Date(parentJob.created_at).getTime(),
+          processing_duration: parentJob.processing_started_at ? 
+            Date.now() - new Date(parentJob.processing_started_at).getTime() : null,
+          average_chunk_processing_time: chunkStatuses
+            .filter(c => c.processing_time)
+            .reduce((sum, c, _, arr) => sum + c.processing_time / arr.length, 0) || null
+        }
       };
 
     } catch (error) {
@@ -504,5 +630,182 @@ export class UploadCoordinator {
       });
       throw error;
     }
+  }
+
+  /**
+   * Retry failed chunk processing (for chunks that uploaded but failed processing)
+   */
+  async retryChunkProcessing(parent_job_id, chunk_index) {
+    try {
+      const parentJob = await this.parentJobManager.getParentJob(parent_job_id);
+      const sub_job_id = parentJob.sub_jobs[chunk_index];
+
+      if (!sub_job_id) {
+        throw new Error(`Sub-job not found for chunk ${chunk_index}`);
+      }
+
+      const subJob = await this.subJobProcessor.getSubJob(sub_job_id);
+      
+      // Ensure chunk is in a state that can be retried
+      if (subJob.status !== 'failed' && subJob.status !== 'uploaded') {
+        throw new Error(`Chunk ${chunk_index} is not in a retryable state (current status: ${subJob.status})`);
+      }
+
+      // Reset processing-related fields but keep upload info
+      await this.subJobProcessor.updateSubJob(sub_job_id, {
+        status: 'uploaded', // Reset to uploaded state
+        error: null,
+        retry_count: 0,
+        processing_started_at: null,
+        completed_at: null,
+        failed_at: null,
+        last_error: null,
+        last_error_type: null,
+        final_retry_count: null
+      });
+
+      // Trigger processing again
+      let processingQueued = false;
+      let processingMethod = 'direct';
+      
+      if (this.env.CHUNK_PROCESSING_QUEUE) {
+        try {
+          await this.env.CHUNK_PROCESSING_QUEUE.send({ 
+            parent_job_id, 
+            sub_job_id,
+            chunk_index,
+            trigger: 'manual_retry'
+          });
+          processingQueued = true;
+          processingMethod = 'queue';
+        } catch (queueError) {
+          apiLogger.warn('Queue not available for retry, falling back to direct processing', queueError);
+        }
+      }
+      
+      if (!processingQueued) {
+        try {
+          const { processChunkUpload } = await import('../handlers/chunk-upload-complete-handler.js');
+          
+          // Process directly in background with rate limiting (don't await to avoid timeout)
+          setTimeout(async () => {
+            await withChunkProcessingLimits(async () => {
+              try {
+                await processChunkUpload(parent_job_id, sub_job_id, chunk_index, this.env);
+              } catch (error) {
+                apiLogger.error(`Retry processing failed for chunk ${chunk_index}`, error);
+              }
+            }, {
+              parent_job_id,
+              sub_job_id,
+              chunk_index,
+              operation: 'retry_chunk_processing'
+            });
+          }, 100);
+          
+          processingMethod = 'direct';
+        } catch (error) {
+          throw new Error(`Failed to retry processing chunk ${chunk_index}: ${error.message}`);
+        }
+      }
+
+      apiLogger.info('retry', `Retrying chunk ${chunk_index} processing`, {
+        parent_job_id,
+        sub_job_id,
+        chunk_index,
+        processing_method: processingMethod
+      });
+
+      return {
+        chunk_index,
+        sub_job_id,
+        processing_queued: processingQueued,
+        processing_method: processingMethod,
+        status: 'retry_initiated'
+      };
+
+    } catch (error) {
+      apiLogger.error(`Failed to retry chunk ${chunk_index} processing`, error, {
+        parent_job_id,
+        chunk_index
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get recommended retry type based on chunk status
+   */
+  getRecommendedRetryType(chunkStatus) {
+    if (chunkStatus.status === 'missing_sub_job' || chunkStatus.status === 'kv_error') {
+      return 'upload'; // Need to recreate and upload
+    }
+    
+    if (chunkStatus.status === 'failed') {
+      // If chunk has upload timestamp but failed, it's a processing failure
+      if (chunkStatus.uploaded_at) {
+        return 'processing';
+      } else {
+        return 'upload';
+      }
+    }
+    
+    // For other statuses, try processing first
+    return 'processing';
+  }
+
+  /**
+   * Retry multiple chunks at once
+   */
+  async retryMultipleChunks(parent_job_id, chunk_indices, retry_type = 'auto') {
+    const results = [];
+    const errors = [];
+
+    for (const chunk_index of chunk_indices) {
+      try {
+        let result;
+        
+        if (retry_type === 'upload') {
+          result = await this.retryChunkUpload(parent_job_id, chunk_index);
+        } else if (retry_type === 'processing') {
+          result = await this.retryChunkProcessing(parent_job_id, chunk_index);
+        } else {
+          // Auto-detect retry type based on chunk status
+          const parentJob = await this.parentJobManager.getParentJob(parent_job_id);
+          const sub_job_id = parentJob.sub_jobs[chunk_index];
+          
+          if (sub_job_id) {
+            const subJob = await this.subJobProcessor.getSubJob(sub_job_id);
+            
+            if (subJob.status === 'failed' && subJob.uploaded_at) {
+              // Chunk uploaded but processing failed
+              result = await this.retryChunkProcessing(parent_job_id, chunk_index);
+            } else {
+              // Chunk upload failed or never uploaded
+              result = await this.retryChunkUpload(parent_job_id, chunk_index);
+            }
+          } else {
+            // No sub-job found, retry upload
+            result = await this.retryChunkUpload(parent_job_id, chunk_index);
+          }
+        }
+        
+        results.push(result);
+        
+      } catch (error) {
+        errors.push({
+          chunk_index,
+          error: error.message
+        });
+      }
+    }
+
+    return {
+      successful_retries: results.length,
+      failed_retries: errors.length,
+      total_chunks: chunk_indices.length,
+      results,
+      errors: errors.length > 0 ? errors : undefined
+    };
   }
 } 

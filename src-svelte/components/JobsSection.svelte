@@ -59,6 +59,43 @@
     }
   }
   
+  // Also add more frequent polling when jobs are completing (every 1 second instead of 3)
+  let fastRefreshTimer = null;
+  
+  // Fast refresh when jobs are in critical completion states
+  $: hasCompletingJobs = $jobs.some(job => 
+    job.status === 'processing' && 
+    job.progress && 
+    job.progress > 80 // Jobs that are >80% complete
+  );
+  
+  $: {
+    if (hasCompletingJobs && !fastRefreshTimer) {
+      console.log('Starting fast refresh for completing jobs');
+      fastRefreshTimer = setInterval(async () => {
+        if (hasCompletingJobs) {
+          try {
+            await fetchJobs();
+          } catch (error) {
+            console.error('Fast refresh failed:', error);
+          }
+        }
+      }, 1000); // Every 1 second for jobs >80% complete
+    } else if (!hasCompletingJobs && fastRefreshTimer) {
+      console.log('Stopping fast refresh');
+      clearInterval(fastRefreshTimer);
+      fastRefreshTimer = null;
+    }
+  }
+  
+  onDestroy(() => {
+    stopAutoRefresh();
+    if (fastRefreshTimer) {
+      clearInterval(fastRefreshTimer);
+      fastRefreshTimer = null;
+    }
+  });
+  
   async function handleRefresh() {
     refreshing = true;
     try {

@@ -133,10 +133,18 @@ export class ChunkAssembler {
     
     for (let i = 0; i < transcripts.length; i++) {
       const chunk = transcripts[i];
-      if (chunk && !chunk.failed && chunk.text) {
+      
+      // Consider chunks valid if they:
+      // 1. Exist and didn't fail
+      // 2. Have transcribed text OR are intentionally skipped (like chunk 0 metadata)
+      if (chunk && !chunk.failed && (chunk.text || chunk.skipped)) {
         validChunks.push({
           ...chunk,
-          original_index: i
+          original_index: i,
+          // Ensure text is always a string (empty for skipped chunks)
+          text: chunk.text || '',
+          // Mark skipped chunks for special handling
+          is_skipped: chunk.skipped === true
         });
       }
     }
@@ -150,8 +158,16 @@ export class ChunkAssembler {
   assembleRawTranscript(validChunks) {
     if (validChunks.length === 0) return '';
     
+    // Filter out skipped chunks for transcript assembly but include them in processing
+    const chunksWithText = validChunks.filter(chunk => !chunk.is_skipped && chunk.text);
+    
+    if (chunksWithText.length === 0) {
+      // All chunks were skipped - return informative message
+      return '[All audio chunks were skipped - likely file contains only metadata/headers]';
+    }
+    
     // Use intelligent merging to handle overlaps
-    return this.intelligentMerge(validChunks.map(chunk => chunk.raw_text || chunk.text));
+    return this.intelligentMerge(chunksWithText.map(chunk => chunk.raw_text || chunk.text));
   }
 
   /**
@@ -160,7 +176,14 @@ export class ChunkAssembler {
   assembleCorrectedTranscript(validChunks, use_llm, llm_mode) {
     if (!use_llm || llm_mode !== 'per_chunk') return null;
     
-    const correctedTexts = validChunks.map(chunk => chunk.corrected_text || chunk.text);
+    // Filter out skipped chunks for transcript assembly
+    const chunksWithText = validChunks.filter(chunk => !chunk.is_skipped && chunk.text);
+    
+    if (chunksWithText.length === 0) {
+      return '[All audio chunks were skipped - no LLM correction applied]';
+    }
+    
+    const correctedTexts = chunksWithText.map(chunk => chunk.corrected_text || chunk.text);
     return this.intelligentMerge(correctedTexts);
   }
 

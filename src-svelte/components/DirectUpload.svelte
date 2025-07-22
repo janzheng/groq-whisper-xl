@@ -6,10 +6,21 @@
   let selectedFile = null;
   let url = '';
   let useLLM = false;
+  let selectedModel = 'whisper-large-v3'; // Default model
+  let chunkSizeMB = 10; // Default chunk size for direct processing (changed from 20 to 10)
   let webhookUrl = '';
   let uploadAreaElement;
   let fileInput;
   let uploadAreaContent = getDefaultUploadAreaContent();
+  
+  // Debug options
+  let debugSaveChunks = false;
+  
+  // Available Whisper models
+  const whisperModels = [
+    { value: 'whisper-large-v3', label: 'Whisper Large v3 (Default)' },
+    { value: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo (Faster)' }
+  ];
   
   function getDefaultUploadAreaContent() {
     return {
@@ -96,12 +107,12 @@
             subtitle: 'Transcribing audio with Groq Whisper'
           };
           
-          await uploadFile(selectedFile, useLLM, webhookUrl || null);
+          await uploadFile(selectedFile, useLLM, webhookUrl || null, selectedModel, chunkSizeMB, debugSaveChunks);
           
           uploadAreaContent = {
             icon: 'mdi:check',
             title: `${selectedFile.name} uploaded successfully!`,
-            subtitle: 'Check "Jobs" section for progress',
+            subtitle: 'Transcript will automatically refresh when ready.',
             success: true
           };
           
@@ -130,7 +141,7 @@
       if (url.trim()) {
         try {
           $isUploading = true;
-          await uploadFromUrl(url.trim(), useLLM, webhookUrl || null);
+          await uploadFromUrl(url.trim(), useLLM, webhookUrl || null, selectedModel, chunkSizeMB, debugSaveChunks);
           
           // Reset form on success
           url = '';
@@ -259,6 +270,40 @@
     <div class="font-bold mb-2">Settings:</div>
     <div class="space-y-3">
       <div>
+        <label for="model-select" class="text-terminal-text-dim block mb-1">Whisper model:</label>
+        <select 
+          id="model-select"
+          bind:value={selectedModel}
+          class="bg-terminal-bg-light border border-terminal-border text-terminal-text px-3 py-2 w-full focus:outline-none focus:border-terminal-accent"
+        >
+          {#each whisperModels as model}
+            <option value={model.value}>{model.label}</option>
+          {/each}
+        </select>
+        <div class="text-xs text-terminal-text-dim mt-1">
+          💡 <strong>Turbo:</strong> Faster processing, <strong>v3:</strong> Higher accuracy
+        </div>
+      </div>
+      
+      <div>
+        <label for="chunk-size-direct" class="text-terminal-text-dim block mb-1">Chunk size for large files:</label>
+        <select 
+          id="chunk-size-direct"
+          bind:value={chunkSizeMB}
+          class="bg-terminal-bg-light border border-terminal-border text-terminal-text px-3 py-2 w-full focus:outline-none focus:border-terminal-accent"
+        >
+          <option value={5}>5MB (Smaller chunks)</option>
+          <option value={10}>10MB (Default)</option>
+          <option value={20}>20MB (Larger chunks)</option>
+          <option value={50}>50MB (Fewer API calls)</option>
+          <option value={100}>100MB (Maximum efficiency)</option>
+        </select>
+        <div class="text-xs text-terminal-text-dim mt-1">
+          💡 Files over 15MB are automatically chunked using this size. Larger chunks = fewer API calls.
+        </div>
+      </div>
+      
+      <div>
         <label class="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" bind:checked={useLLM} class="w-4 h-4">
           <iconify-icon icon="mdi:brain" class="text-terminal-accent"></iconify-icon>
@@ -276,6 +321,25 @@
           type="url" 
           placeholder="https://your-webhook.com/endpoint"
         >
+      </div>
+      
+      <!-- Debug Options -->
+      <div class="border border-terminal-border p-2">
+        <div class="text-terminal-text font-bold mb-2 text-sm">🐛 Debug Options</div>
+        <div>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" bind:checked={debugSaveChunks} class="w-4 h-4">
+            <iconify-icon icon="mdi:folder-download" class="text-terminal-text-dim"></iconify-icon>
+            <span class="text-terminal-text">Save chunks to debug storage</span>
+            <span class="text-terminal-text-dim text-xs">(For troubleshooting large file chunks)</span>
+          </label>
+          {#if debugSaveChunks}
+            <div class="text-xs text-terminal-text-dim mt-1 ml-6">
+              ⚠️ Large files (>15MB) are automatically chunked. Chunks will be saved to R2 debug storage for inspection.
+              Check logs for full R2 URLs to access files directly.
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
   </div>

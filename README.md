@@ -104,6 +104,9 @@ curl "https://your-worker.workers.dev/result?job_id=<job_id>"
 
 # List all jobs
 curl "https://your-worker.workers.dev/jobs"
+
+# Monitor rate limiting status
+curl "https://your-worker.workers.dev/rate-limit-status"
 ```
 
 ## Web Interface
@@ -189,6 +192,59 @@ ALLOWED_ORIGINS=https://yourdomain.com,http://localhost:3000
 MAX_FILE_SIZE=107374182400  # 100GB default
 ```
 
+## Rate Limiting & Performance
+
+The system includes intelligent rate limiting with a custom Workers-compatible semaphore implementation to prevent API throttling and optimize performance:
+
+### Default Rate Limits
+- **Transcription API**: 4 concurrent calls, 10 requests/second
+- **LLM Correction**: 3 concurrent calls, 8 requests/second
+- **Job Spawning**: 2 concurrent job creation operations
+- **Chunk Processing**: 3 concurrent chunk processing initiations
+- **Automatic backoff**: Exponential retry with jitter
+- **Smart queuing**: Requests queue when limits are reached
+- **Workers-native**: Custom semaphore implementation without Node.js dependencies
+
+### Monitoring
+```bash
+# Check current rate limit status
+curl "https://your-worker.workers.dev/rate-limit-status"
+
+# Example response:
+{
+  "rate_limits": {
+    "transcription": {
+      "waiting": 0,
+      "concurrency_limit": 4,
+      "rate_limit_rps": 10,
+      "active_slots": 4
+    },
+    "llm": {
+      "waiting": 0,
+      "concurrency_limit": 3,
+      "rate_limit_rps": 8,
+      "active_slots": 3
+    },
+    "job_spawn": {
+      "waiting": 0,
+      "concurrency_limit": 2,
+      "active_slots": 2
+    },
+    "chunk_processing": {
+      "waiting": 0,
+      "concurrency_limit": 3,
+      "active_slots": 3
+    }
+  },
+  "recommendations": {
+    "transcription": "Rate limiting appears healthy",
+    "llm": "LLM rate limiting appears healthy",
+    "job_spawn": "Job spawning appears healthy",
+    "chunk_processing": "Chunk processing appears healthy"
+  }
+}
+```
+
 ## Supported Formats
 
 - **Audio**: MP3, WAV, FLAC, M4A, OGG, AAC, WMA
@@ -213,10 +269,12 @@ MAX_FILE_SIZE=107374182400  # 100GB default
 ## Features
 
 - **Automatic retries** with exponential backoff
+- **Rate limiting** - Intelligent concurrency control to prevent API throttling
 - **Circuit breaker** protection against API failures  
 - **CORS protection** for web interface security
 - **File cleanup** - Automatic expiration after 24 hours
 - **Health monitoring** - `/health` endpoint for status checks
+- **Rate limit monitoring** - `/rate-limit-status` endpoint for performance insights
 
 ## License
 

@@ -2,7 +2,8 @@ import { UploadCoordinator } from '../core/upload-coordinator.js';
 import { ParentJobManager } from '../core/parent-job-manager.js';
 import { SubJobProcessor } from '../core/sub-job-processor.js';
 import { ChunkAssembler } from '../core/chunk-assembly.js';
-import { apiLogger } from '../../core/logger.js';
+import { apiLogger, processingLogger } from '../../core/logger.js';
+import { withChunkProcessingLimits } from '../../core/rate-limiter.js';
 
 /**
  * Handler for /chunk-upload-complete endpoint
@@ -22,94 +23,115 @@ import { apiLogger } from '../../core/logger.js';
  */
 export async function handleChunkUploadComplete(request, env) {
   try {
-    const contentType = request.headers.get('content-type') || '';
+    const { parent_job_id, chunk_index, actual_size } = await request.json();
+
+    if (!parent_job_id || chunk_index === undefined) {
+      return new Response(JSON.stringify({
+        error: 'parent_job_id and chunk_index are required'
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+         processingLogger.info('upload_complete', `Chunk ${chunk_index} upload completed`, {
+      parent_job_id,
+      chunk_index,
+      actual_size
+    });
+
+    // Get parent job details
+    const { ParentJobManager } = await import('../core/parent-job-manager.js');
+    const parentJobManager = new ParentJobManager(env);
+    const parentJob = await parentJobManager.getParentJob(parent_job_id);
     
-    if (!contentType.includes('application/json')) {
+    if (!parentJob) {
       return new Response(JSON.stringify({
-        error: 'Content-Type must be application/json'
-      }), { 
-        status: 400,
+        error: 'Parent job not found'
+      }), {
+        status: 404,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const body = await request.json();
-    const { parent_job_id, chunk_index, actual_size } = body;
+    // Update upload progress
+    await parentJobManager.updateChunkUploadProgress(parent_job_id, chunk_index);
 
-    // Validate required parameters
-    if (!parent_job_id) {
+    // Process this chunk immediately
+    const { SubJobProcessor } = await import('../core/sub-job-processor.js');
+    const processor = new SubJobProcessor(env);
+    
+    // Generate sub-job ID for this chunk
+    const sub_job_id = `${parent_job_id}_chunk_${chunk_index}`;
+    
+    try {
+      // Process chunk with parent job settings and rate limiting
+      const result = await withChunkProcessingLimits(async () => {
+        return await processor.processChunk(
+          sub_job_id, 
+          null, // No stream controller for individual chunk completion
+          parentJob.use_llm, 
+          parentJob.llm_mode,
+          parentJob.model || 'whisper-large-v3' // Use model from parent job
+        );
+      }, {
+        parent_job_id,
+        chunk_index,
+        operation: 'chunk_upload_complete_processing'
+      });
+
+      // Update parent job with chunk result
+      await parentJobManager.processCompletedChunk(parent_job_id, result);
+
+             processingLogger.info('processing_complete', `Chunk ${chunk_index} processing completed`, {
+        parent_job_id,
+        chunk_index,
+        model: parentJob.model,
+        transcript_length: result.text?.length || 0
+      });
+
       return new Response(JSON.stringify({
-        error: 'parent_job_id is required'
-      }), { 
-        status: 400,
+        message: 'Chunk upload and processing completed',
+        parent_job_id,
+        chunk_index,
+        actual_size,
+        processing_result: {
+          text: result.text,
+          duration: result.duration,
+          model: result.model,
+          segments_count: result.segments?.length || 0
+        }
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+    } catch (processingError) {
+             processingLogger.error(`Chunk ${chunk_index} processing failed`, processingError, {
+        parent_job_id,
+        chunk_index,
+        model: parentJob.model
+      });
+
+      return new Response(JSON.stringify({
+        message: 'Chunk uploaded but processing failed',
+        parent_job_id,
+        chunk_index,
+        actual_size,
+        processing_error: processingError.message
+      }), {
+        status: 200, // Upload succeeded, processing failed
         headers: { 'Content-Type': 'application/json' }
       });
     }
-
-    if (chunk_index === undefined || chunk_index < 0) {
-      return new Response(JSON.stringify({
-        error: 'valid chunk_index is required'
-      }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (!actual_size || actual_size <= 0) {
-      return new Response(JSON.stringify({
-        error: 'actual_size is required and must be greater than 0'
-      }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    apiLogger.info('upload', `Chunk ${chunk_index} upload completed`, {
-      parent_job_id,
-      chunk_index,
-      actual_size
-    });
-
-    // Process the chunk upload completion
-    const coordinator = new UploadCoordinator(env);
-    const result = await coordinator.handleChunkUploadComplete(
-      parent_job_id, 
-      chunk_index, 
-      actual_size
-    );
-
-    // Upload coordinator now handles both queue and direct processing automatically
-
-    return new Response(JSON.stringify({
-      message: `Chunk ${chunk_index} upload completed successfully`,
-      parent_job_id,
-      chunk_index,
-      status: 'upload_complete',
-      processing_queued: result.processing_queued,
-      processing_method: result.processing_method,
-      sub_job_id: result.sub_job_id,
-      actual_size,
-      next_steps: [
-        'Chunk processing will begin automatically',
-        'Monitor progress via SSE stream',
-        'Results will be available in real-time'
-      ]
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' }
-    });
 
   } catch (error) {
-    apiLogger.error('Failed to handle chunk upload completion', error);
-    
-    const statusCode = error.message.includes('not found') ? 404 : 500;
-    
+    processingLogger.error('Chunk upload complete handler failed', error);
     return new Response(JSON.stringify({
-      error: 'Failed to process chunk upload completion',
-      message: error.message,
-      type: 'upload_completion_error'
+      error: 'Failed to handle chunk upload completion',
+      message: error.message
     }), {
-      status: statusCode,
+      status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
   }
@@ -240,13 +262,20 @@ export async function processChunkUpload(parent_job_id, sub_job_id, chunk_index,
     // Get parent job for processing settings
     const parentJob = await parentJobManager.getParentJob(parent_job_id);
     
-    // Process the chunk (this includes transcription and optional LLM correction)
-    const chunkResult = await subJobProcessor.processChunk(
+    // Process the chunk (this includes transcription and optional LLM correction) with rate limiting
+    const chunkResult = await withChunkProcessingLimits(async () => {
+      return await subJobProcessor.processChunk(
+        sub_job_id,
+        null, // No stream controller for queue processing
+        parentJob.use_llm,
+        parentJob.llm_mode
+      );
+    }, {
+      parent_job_id,
       sub_job_id,
-      null, // No stream controller for queue processing
-      parentJob.use_llm,
-      parentJob.llm_mode
-    );
+      chunk_index,
+      operation: 'queue_chunk_processing'
+    });
 
     // Update parent job with chunk completion
     await parentJobManager.updateChunkCompleted(parent_job_id, chunk_index, chunkResult);

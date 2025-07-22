@@ -31,6 +31,7 @@ export const chunkedUploadedChunks = writable(0);
 export const chunkedCompletedChunks = writable(0);
 export const chunkedFailedChunks = writable(0);
 export const chunkedSuccessRate = writable(0);
+export const chunkedFileSize = writable('');
 
 // API base URL
 export const API_BASE = '';
@@ -39,7 +40,7 @@ export const API_BASE = '';
 export function formatBytes(bytes) {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
-  const sizes = ['Bytes', 'KB', 'GB'];
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
@@ -95,6 +96,7 @@ export function resetChunkedStreaming() {
   chunkedCompletedChunks.set(0);
   chunkedFailedChunks.set(0);
   chunkedSuccessRate.set(0);
+  chunkedFileSize.set('');
   chunkedProgress.set({ upload: 0, processing: 0, overall: 0 });
   
   // Reset arrival counter

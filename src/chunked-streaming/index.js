@@ -110,27 +110,37 @@ export {
  * This should be called from the main queue handler
  */
 export async function handleChunkedUploadQueue(batch, env) {
-c  // Import the processor function dynamically
+  // Import the processor function and rate limiter dynamically
   const { processChunkUpload } = await import('./handlers/chunk-upload-complete-handler.js');
+  const { withChunkProcessingLimits } = await import('../core/rate-limiter.js');
   
   for (const msg of batch.messages) {
     const { parent_job_id, sub_job_id, chunk_index } = msg.body;
     
-    try {
-      await processChunkUpload(parent_job_id, sub_job_id, chunk_index, env);
-    } catch (error) {
-      // Log error and also attempt to mark chunk as failed in parent job
-      console.error(`Failed to process chunk ${chunk_index} for job ${parent_job_id}:`, error);
-      
-      // Try to update parent job to reflect chunk failure
+    // Process each message with rate limiting to prevent API flooding
+    await withChunkProcessingLimits(async () => {
       try {
-        const { ParentJobManager } = await import('./core/parent-job-manager.js');
-        const parentJobManager = new ParentJobManager(env);
-        await parentJobManager.updateChunkFailed(parent_job_id, chunk_index, error);
-      } catch (updateError) {
-        console.error(`Failed to update chunk failure status for ${parent_job_id}:`, updateError);
+        await processChunkUpload(parent_job_id, sub_job_id, chunk_index, env);
+      } catch (error) {
+        // Log error and also attempt to mark chunk as failed in parent job
+        console.error(`Failed to process chunk ${chunk_index} for job ${parent_job_id}:`, error);
+        
+        // Try to update parent job to reflect chunk failure
+        try {
+          const { ParentJobManager } = await import('./core/parent-job-manager.js');
+          const parentJobManager = new ParentJobManager(env);
+          await parentJobManager.updateChunkFailed(parent_job_id, chunk_index, error);
+        } catch (updateError) {
+          console.error(`Failed to update chunk failure status for ${parent_job_id}:`, updateError);
+        }
+        throw error; // Re-throw to maintain error handling behavior
       }
-    }
+    }, {
+      parent_job_id,
+      sub_job_id,
+      chunk_index,
+      operation: 'queue_message_processing'
+    });
   }
 }
 

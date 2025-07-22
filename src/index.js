@@ -1,8 +1,9 @@
-import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { STATIC_FILES } from './static-web.js';
-import { apiLogger, processingLogger, formatBytes } from './core/logger.js';
+import { apiLogger, processingLogger, formatBytes, withExponentialRetry } from './core/logger.js';
 import { handleStreamingTranscription, transcribeChunk } from './core/streaming.js';
+import { withLLMLimits, getRateLimitStatus } from './core/rate-limiter.js';
 
 // Chunked Upload Streaming imports
 import {
@@ -62,13 +63,128 @@ async function handleChunkUpload(request, env) {
     const chunkData = await chunk.arrayBuffer();
     const actual_size = chunkData.byteLength;
 
+    // Check if debug mode is enabled for this job
+    let debugSaveChunks = false;
+    let parentJobData = null;
+    try {
+      const rawParentJobData = await env.GROQ_JOBS_KV.get(parent_job_id);
+      if (rawParentJobData) {
+        parentJobData = JSON.parse(rawParentJobData);
+        debugSaveChunks = parentJobData.debug_save_chunks || false;
+      }
+    } catch (error) {
+      apiLogger.warn('Could not get parent job for debug check', { parent_job_id });
+    }
+
+    // Enhanced validation and debugging for chunk integrity
+    const isChunk0 = chunk_index === 0;
+    
+    if (isChunk0) {
+      // Detailed analysis of chunk 0 on server side
+      const uint8Array = new Uint8Array(chunkData);
+      const first64Bytes = Array.from(uint8Array.slice(0, Math.min(64, uint8Array.length)));
+      const zeroCount = first64Bytes.filter(byte => byte === 0).length;
+      const zeroPercentage = (zeroCount / first64Bytes.length) * 100;
+      
+      apiLogger.info('chunk0_server', 'Chunk 0 received on server', {
+        parent_job_id,
+        actual_size,
+        expected_size,
+        size_match: actual_size === expected_size,
+        first_64_bytes: first64Bytes.map(b => b.toString(16).padStart(2, '0')).join(' '),
+        zero_count: zeroCount,
+        zero_percentage: zeroPercentage.toFixed(1),
+        suspicious: zeroPercentage > 25,
+        original_chunk_name: chunk.name || 'unnamed',
+        debug_save_enabled: debugSaveChunks
+      });
+      
+      if (zeroPercentage > 25) {
+        apiLogger.warn('chunk0_server', `Chunk 0 has ${zeroPercentage.toFixed(1)}% zeros on server - corruption detected!`, {
+          parent_job_id,
+          chunk_index,
+          zero_percentage: zeroPercentage
+        });
+      }
+    }
+
+    // Save chunk to temporary folder if debug mode is enabled
+    if (debugSaveChunks) {
+      try {
+        const debugFileName = `debug_chunk_${parent_job_id}_${chunk_index}.${parentJobData?.filename?.split('.').pop() || 'mp3'}`;
+        const debugInfo = {
+          parent_job_id,
+          chunk_index,
+          actual_size,
+          expected_size,
+          filename: debugFileName,
+          saved_at: new Date().toISOString(),
+          original_filename: parentJobData?.filename || 'unknown',
+          chunk_name: chunk.name || 'unnamed'
+        };
+
+        // Save to R2 (Workers can't access local file system)
+        const debugKey = `debug/${parent_job_id}/${debugFileName}`;
+        const bucketName = env.R2_BUCKET_NAME || (env.ENVIRONMENT === 'development' ? 'groq-whisper-audio-preview' : 'groq-whisper-audio');
+        const s3Client = createS3Client(env);
+        
+        const debugPutCmd = new PutObjectCommand({
+          Bucket: bucketName,
+          Key: debugKey,
+          Body: chunkData,
+          ContentType: 'application/octet-stream',
+          Metadata: {
+            'debug-info': JSON.stringify(debugInfo),
+            'parent-job-id': parent_job_id,
+            'chunk-index': chunk_index.toString(),
+            'original-filename': parentJobData?.filename || 'unknown'
+          }
+        });
+        
+        await s3Client.send(debugPutCmd);
+        
+        // Create full R2 URL for easy access
+        const r2Url = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${bucketName}/${debugKey}`;
+        const debugEndpointUrl = `/debug/chunk?parent_job_id=${parent_job_id}&chunk_index=${chunk_index}`;
+        
+        apiLogger.info('debug_save', `📁 Saved chunk ${chunk_index} to R2`, {
+          parent_job_id,
+          chunk_index,
+          debug_key: debugKey,
+          bucket: bucketName,
+          size: formatBytes(actual_size),
+          r2_url: r2Url,
+          download_url: debugEndpointUrl,
+          environment: env.ENVIRONMENT || 'production'
+        });
+
+        // Also save debug info to KV for easy retrieval
+        const debugInfoKey = `debug_${parent_job_id}_chunk_${chunk_index}`;
+        await env.GROQ_JOBS_KV.put(debugInfoKey, JSON.stringify({
+          ...debugInfo,
+          debug_key: debugKey,
+          bucket: bucketName,
+          r2_url: r2Url,
+          download_url: debugEndpointUrl
+        }), { expirationTtl: 86400 }); // Expire after 24 hours
+        
+      } catch (debugError) {
+        apiLogger.error('Failed to save debug chunk', debugError, {
+          parent_job_id,
+          chunk_index
+        });
+        // Continue processing even if debug save fails
+      }
+    }
+
     // Validate chunk size if expected_size provided
     if (expected_size > 0 && actual_size !== expected_size) {
       apiLogger.warn('Chunk size mismatch', {
         parent_job_id,
         chunk_index,
         expected_size,
-        actual_size
+        actual_size,
+        is_chunk_0: isChunk0
       });
     }
 
@@ -219,6 +335,8 @@ export default {
       return handleManualProcess(request, env);
     } else if (url.pathname === '/health' && request.method === 'GET') {
       return handleHealth(request, env);
+    } else if (url.pathname === '/rate-limit-status' && request.method === 'GET') {
+      return handleRateLimitStatus(request, env);
     }
     
     // Chunked Upload Streaming API
@@ -241,6 +359,13 @@ export default {
       return handleChunkedStream(request, env, parent_job_id);
     } else if (url.pathname.startsWith('/chunked-stream/') && request.method === 'OPTIONS') {
       return handleChunkedStreamOptions(request);
+    }
+    
+    // Debug endpoints for chunk inspection
+    else if (url.pathname === '/debug/chunks' && request.method === 'GET') {
+      return handleDebugChunksList(request, env);
+    } else if (url.pathname === '/debug/chunk' && request.method === 'GET') {
+      return handleDebugChunkDownload(request, env);
     }
     
     // For any other GET request, serve the main page (SPA fallback)
@@ -288,16 +413,18 @@ function createS3Client(env) {
  * Direct file upload via FormData or JSON
  * curl -X POST http://localhost:8787/upload \
  *   -F "file=@audio.mp3" \
- *   -F "use_llm=true"
+ *   -F "use_llm=true" \
+ *   -F "model=whisper-large-v3" \
+ *   -F "chunk_size_mb=10"
  * 
  * OR with JSON:
  * curl -X POST http://localhost:8787/upload \
  *   -H "Content-Type: application/json" \
- *   -d '{"filename": "audio.mp3", "file_data": "base64encodeddata", "use_llm": true}'
+ *   -d '{"filename": "audio.mp3", "file_data": "base64encodeddata", "use_llm": true, "model": "whisper-large-v3", "chunk_size_mb": 10}'
  */
 async function handleDirectUpload(request, env) {
   const contentType = request.headers.get('content-type') || '';
-  let filename, fileData, use_llm = false, webhook_url = null;
+  let filename, fileData, use_llm = false, webhook_url = null, model = 'whisper-large-v3', chunk_size_mb = 10, debug_save_chunks = false;
   
   try {
     if (contentType.includes('multipart/form-data')) {
@@ -315,6 +442,9 @@ async function handleDirectUpload(request, env) {
       fileData = await file.arrayBuffer();
       use_llm = formData.get('use_llm') === 'true';
       webhook_url = formData.get('webhook_url') || null;
+      model = formData.get('model') || 'whisper-large-v3';
+      chunk_size_mb = parseFloat(formData.get('chunk_size_mb')) || 10;
+      debug_save_chunks = formData.get('debug_save_chunks') === 'true';
       
     } else if (contentType.includes('application/json')) {
       // Handle JSON upload with base64 data
@@ -322,6 +452,9 @@ async function handleDirectUpload(request, env) {
       filename = body.filename;
       use_llm = body.use_llm || false;
       webhook_url = body.webhook_url || null;
+      model = body.model || 'whisper-large-v3';
+      chunk_size_mb = body.chunk_size_mb || 10;
+      debug_save_chunks = body.debug_save_chunks || false;
       
       if (!body.file_data) {
         return new Response(JSON.stringify({ 
@@ -373,9 +506,12 @@ async function handleDirectUpload(request, env) {
       actual_size: fileData.byteLength,
       key,
       use_llm,
+      model,
+      chunk_size_mb,
       webhook_url,
       created_at: new Date().toISOString(),
-      uploaded_at: new Date().toISOString()
+      uploaded_at: new Date().toISOString(),
+      debug_save_chunks
     };
     
     await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
@@ -388,6 +524,8 @@ async function handleDirectUpload(request, env) {
       job_id,
       filename,
       file_size: fileData.byteLength,
+      model,
+      chunk_size_mb,
       processing_method: fileData.byteLength > 15 * 1024 * 1024 ? 'chunked' : 'direct',
       status_url: `/status?job_id=${job_id}`,
       result_url: `/result?job_id=${job_id}`
@@ -412,11 +550,11 @@ async function handleDirectUpload(request, env) {
  * Upload from URL - fetch audio from a URL and process it
  * curl -X POST http://localhost:8787/upload-url \
  *   -H "Content-Type: application/json" \
- *   -d '{"url": "https://example.com/audio.mp3", "use_llm": true}'
+ *   -d '{"url": "https://example.com/audio.mp3", "use_llm": true, "model": "whisper-large-v3", "chunk_size_mb": 10}'
  */
 async function handleUrlUpload(request, env) {
   try {
-    const { url: audioUrl, filename = null, use_llm = false, webhook_url = null } = await request.json();
+    const { url: audioUrl, filename = null, use_llm = false, webhook_url = null, model = 'whisper-large-v3', chunk_size_mb = 10, debug_save_chunks = false } = await request.json();
     
     if (!audioUrl) {
       return new Response(JSON.stringify({ 
@@ -562,9 +700,12 @@ async function handleUrlUpload(request, env) {
       actual_size: fileSize,
       key,
       use_llm,
+      model,
+      chunk_size_mb,
       webhook_url,
       created_at: new Date().toISOString(),
-      uploaded_at: new Date().toISOString()
+      uploaded_at: new Date().toISOString(),
+      debug_save_chunks
     };
     
     await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
@@ -578,6 +719,8 @@ async function handleUrlUpload(request, env) {
       filename: extractedFilename,
       source_url: audioUrl,
       file_size: fileSize,
+      model,
+      chunk_size_mb,
       processing_method: fileSize > 15 * 1024 * 1024 ? 'chunked' : 'direct',
       status_url: `/status?job_id=${job_id}`,
       result_url: `/result?job_id=${job_id}`
@@ -606,10 +749,10 @@ async function handleUrlUpload(request, env) {
  * Step 1: Get a presigned URL for direct upload
  * curl -X POST http://localhost:8787/get-presigned-url \
  *   -H "Content-Type: application/json" \
- *   -d '{"filename": "audio.mp3", "use_llm": true}'
+ *   -d '{"filename": "audio.mp3", "use_llm": true, "model": "whisper-large-v3", "chunk_size_mb": 10}'
  */
 async function handleGetPresignedUrl(request, env) {
-  const { filename, size = null, use_llm = false, webhook_url = null } = await request.json();
+  const { filename, size = null, use_llm = false, webhook_url = null, model = 'whisper-large-v3', chunk_size_mb = 10 } = await request.json();
   const job_id = crypto.randomUUID();
   const key = `uploads/${job_id}/${filename}`;
   const bucketName = env.R2_BUCKET_NAME || (env.ENVIRONMENT === 'development' ? 'groq-whisper-audio-preview' : 'groq-whisper-audio');
@@ -631,6 +774,8 @@ async function handleGetPresignedUrl(request, env) {
     size,
     key,
     use_llm,
+    model,
+    chunk_size_mb,
     webhook_url,
     created_at: new Date().toISOString(),
     upload_url: signedUrl
@@ -639,6 +784,8 @@ async function handleGetPresignedUrl(request, env) {
   return new Response(JSON.stringify({ 
     job_id, 
     upload_url: signedUrl,
+    model,
+    chunk_size_mb,
     instructions: {
       step1: "Upload your file using: curl -X PUT '<upload_url>' --data-binary @your-file.mp3",
       step2: "Then call: curl -X POST /start -d '{\"job_id\": \"" + job_id + "\"}'",
@@ -873,18 +1020,20 @@ async function processFileIntelligently(job_id, env) {
       filename: job.filename,
       size: formatBytes(fileSize),
       bytes: fileSize,
-      job_id: job_id
+      job_id: job_id,
+      debug_save_chunks: job.debug_save_chunks || false
     });
     
     // Decide processing strategy
     const CHUNK_THRESHOLD = 15 * 1024 * 1024; // 15MB
-    const MAX_CHUNK_SIZE = 20 * 1024 * 1024;  // 20MB chunks
+    const chunkSizeMB = job.chunk_size_mb || 10; // Use job's chunk size or default to 10MB
+    const MAX_CHUNK_SIZE = chunkSizeMB * 1024 * 1024;  // Convert to bytes
     
     if (fileSize <= CHUNK_THRESHOLD) {
       processingLogger.info('transcribe', 'Using direct processing (small file)');
       await processDirectly(job_id, response, env);
     } else {
-      processingLogger.info('chunk', 'Using chunked processing (large file)');
+      processingLogger.info('chunk', `Using chunked processing (large file) with ${chunkSizeMB}MB chunks`);
       await processInChunks(job_id, response, fileSize, MAX_CHUNK_SIZE, env);
     }
     
@@ -923,12 +1072,14 @@ async function processDirectly(job_id, fileResponse, env) {
   
   // Create blob for transcription
   const ext = job.filename.split('.').pop() || 'mp3';
+  const model = job.model || 'whisper-large-v3';
   
   processingLogger.transcribe(`Starting direct transcription`, { 
     filename: job.filename, 
-    extension: ext 
+    extension: ext,
+    model
   });
-  const transcript = await transcribeChunk(combined, ext, env.GROQ_API_KEY);
+  const transcript = await transcribeChunk(combined, ext, env.GROQ_API_KEY, model);
   
   // Apply LLM correction if requested
   let finalTranscript = transcript.text;
@@ -937,18 +1088,21 @@ async function processDirectly(job_id, fileResponse, env) {
     finalTranscript = await applyLLMCorrection(transcript.text, env.GROQ_API_KEY);
   }
   
-  // Update job with results
+  // Update job with results (preserve full Groq response)
   job.status = 'done';
   job.transcripts = [{ 
     text: transcript.text, 
     segments: transcript.segments,
     start: 0,
     duration: totalLength,
-    chunk_index: 0
+    chunk_index: 0,
+    model,
+    groq_response: transcript // Preserve full Groq API response
   }];
   job.final_transcript = finalTranscript;
   job.completed_at = new Date().toISOString();
   job.processing_method = 'direct';
+  job.groq_traces = [transcript]; // Store all API traces for debugging
   
   await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
   
@@ -960,6 +1114,7 @@ async function processDirectly(job_id, fileResponse, env) {
   processingLogger.complete('Direct processing completed', { 
     job_id, 
     filename: job.filename,
+    model,
     transcript_length: finalTranscript?.length || 0
   });
 }
@@ -988,12 +1143,13 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
     offset += chunk.length;
   }
   
-  // Create intelligent chunks with overlap
-  const audioChunks = createChunks(fileBuffer, chunkSize);
+  // Create intelligent chunks with overlap - use audio-aware chunking for better debug chunks
+  const audioChunks = createAudioAwareChunks(fileBuffer, chunkSize, job.filename);
   processingLogger.stats(`Created chunks for processing`, { 
     total_chunks: audioChunks.length,
     chunk_size: formatBytes(chunkSize),
-    job_id
+    job_id,
+    chunking_method: job.filename.toLowerCase().endsWith('.wav') ? 'wav_aware' : 'simple'
   });
   
   job.total_chunks = audioChunks.length;
@@ -1001,7 +1157,9 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
   await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
   
   const transcripts = [];
+  const groqTraces = []; // Store all Groq API responses
   const ext = job.filename.split('.').pop() || 'mp3';
+  const model = job.model || 'whisper-large-v3';
   
   // Process chunks sequentially to avoid rate limits
   for (let i = 0; i < audioChunks.length; i++) {
@@ -1009,17 +1167,97 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
     processingLogger.chunk(`Processing chunk ${i + 1}/${audioChunks.length}`, {
       chunk_index: i + 1,
       chunk_size: formatBytes(chunk.data.length),
+      model,
       job_id
     });
     
+    // Save debug chunk if enabled
+    if (job.debug_save_chunks) {
+      try {
+        const debugFileName = `debug_chunk_${job_id}_${i}.${ext}`;
+        const debugInfo = {
+          parent_job_id: job_id,
+          chunk_index: i,
+          actual_size: chunk.data.length,
+          expected_size: chunk.data.length,
+          filename: debugFileName,
+          saved_at: new Date().toISOString(),
+          original_filename: job.filename,
+          processing_method: 'direct_upload_chunked',
+          is_playable: chunk.isPlayable || false,
+          chunking_method: job.filename.toLowerCase().endsWith('.wav') ? 'wav_aware' : 'simple',
+          audio_data_size: chunk.audioDataSize || chunk.data.length
+        };
+
+        // Save to R2 (Workers can't access local file system)
+        const debugKey = `debug/${job_id}/${debugFileName}`;
+        const bucketName = env.R2_BUCKET_NAME || (env.ENVIRONMENT === 'development' ? 'groq-whisper-audio-preview' : 'groq-whisper-audio');
+        const s3Client = createS3Client(env);
+        
+        const debugPutCmd = new PutObjectCommand({
+          Bucket: bucketName,
+          Key: debugKey,
+          Body: chunk.data,
+          ContentType: 'application/octet-stream',
+          Metadata: {
+            'debug-info': JSON.stringify(debugInfo),
+            'job-id': job_id,
+            'chunk-index': i.toString(),
+            'original-filename': job.filename
+          }
+        });
+        
+        await s3Client.send(debugPutCmd);
+        
+        // Create full R2 URL for easy access
+        const r2Url = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${bucketName}/${debugKey}`;
+        const debugEndpointUrl = `/debug/chunk?job_id=${job_id}&chunk_index=${i}`;
+        
+        processingLogger.info('file', `Saved debug chunk ${i} to R2 - Download: ${debugEndpointUrl}`, {
+          job_id,
+          chunk_index: i,
+          debug_key: debugKey,
+          bucket: bucketName,
+          size: formatBytes(chunk.data.length),
+          download_url: debugEndpointUrl,
+          environment: env.ENVIRONMENT || 'production',
+          is_playable: chunk.isPlayable || false,
+          chunking_method: job.filename.toLowerCase().endsWith('.wav') ? 'wav_aware' : 
+                          job.filename.toLowerCase().endsWith('.mp3') ? 'mp3_aware' : 'simple',
+          localhost_url: `http://localhost:8787${debugEndpointUrl}` // Full localhost URL for easy clicking
+        });
+
+        // Save debug info to KV for easy retrieval via UI
+        const debugInfoKey = `debug_${job_id}_chunk_${i}`;
+        await env.GROQ_JOBS_KV.put(debugInfoKey, JSON.stringify({
+          ...debugInfo,
+          debug_key: debugKey,
+          bucket: bucketName,
+          r2_url: r2Url,
+          download_url: debugEndpointUrl
+        }), { expirationTtl: 86400 });
+        
+      } catch (debugError) {
+        processingLogger.error('Debug chunk save failed', debugError, {
+          job_id,
+          chunk_index: i
+        });
+        // Continue processing even if debug save fails
+      }
+    }
+    
     try {
-      const transcript = await transcribeChunk(chunk.data, ext, env.GROQ_API_KEY);
+      const transcript = await transcribeChunk(chunk.data, ext, env.GROQ_API_KEY, model);
+      groqTraces.push(transcript); // Store full API response
+      
       transcripts.push({
         text: transcript.text,
         segments: transcript.segments,
         start: chunk.start,
         duration: chunk.data.length,
-        chunk_index: i
+        chunk_index: i,
+        model,
+        groq_response: transcript // Preserve full Groq response per chunk
       });
       
       // Update progress
@@ -1029,6 +1267,7 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
       
       processingLogger.complete(`Chunk ${i + 1} completed`, { 
         progress: job.progress,
+        model,
         job_id
       });
       
@@ -1040,6 +1279,7 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
     } catch (error) {
       processingLogger.error(`Chunk ${i + 1} failed`, error, { 
         chunk_index: i + 1,
+        model,
         job_id
       });
       // Continue with other chunks
@@ -1053,6 +1293,7 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
   // Merge transcripts intelligently
   processingLogger.processing('Merging transcripts from chunks', { 
     chunk_count: transcripts.length,
+    model,
     job_id
   });
   let mergedText = transcripts.map(t => t.text).join(' ');
@@ -1070,6 +1311,7 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
   job.completed_at = new Date().toISOString();
   job.processing_method = 'chunked';
   job.success_rate = Math.round((transcripts.length / audioChunks.length) * 100);
+  job.groq_traces = groqTraces; // Store all API traces for debugging
   
   await env.GROQ_JOBS_KV.put(job_id, JSON.stringify(job), { expirationTtl: 86400 });
   
@@ -1083,6 +1325,7 @@ async function processInChunks(job_id, fileResponse, fileSize, chunkSize, env) {
     successful_chunks: transcripts.length,
     total_chunks: audioChunks.length,
     success_rate: job.success_rate,
+    model,
     transcript_length: mergedText?.length || 0
   });
 }
@@ -1113,7 +1356,185 @@ function createChunks(buffer, chunkSize) {
   return chunks;
 }
 
-// LLM correction functions moved to core/streaming.js
+/**
+ * Audio-aware chunking that creates playable chunks with proper headers
+ * CRITICAL: Each chunk must be a valid, independently playable audio file
+ * for the Groq API to accept it.
+ */
+export function createAudioAwareChunks(buffer, chunkSize, filename = '') {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  
+  try {
+    switch (ext) {
+      case 'wav':
+        return createWAVChunks(buffer, chunkSize);
+      case 'mp3':
+        return createMP3Chunks(buffer, chunkSize);
+      case 'mp4':
+      case 'm4a':
+        return createMP4Chunks(buffer, chunkSize);
+      case 'flac':
+        return createFLACChunks(buffer, chunkSize);
+      case 'ogg':
+        return createOGGChunks(buffer, chunkSize);
+      default:
+        // For unknown formats, try to detect and fall back gracefully
+        processingLogger.warn(`Unknown audio format: ${ext}, using simple chunking (may cause API errors)`);
+        return createChunks(buffer, chunkSize);
+    }
+  } catch (error) {
+    processingLogger.error(`Audio-aware chunking failed for ${ext}:`, error);
+    processingLogger.warn('Falling back to simple chunking (may cause API errors)');
+    return createChunks(buffer, chunkSize);
+  }
+}
+
+/**
+ * Create WAV chunks with proper headers for playable debug files
+ */
+function createWAVChunks(buffer, chunkSize) {
+  const chunks = [];
+  
+  // Parse WAV header
+  const wavHeader = parseWAVHeader(buffer);
+  if (!wavHeader) {
+    // Not a valid WAV, fall back to simple chunking
+    return createChunks(buffer, chunkSize);
+  }
+  
+  const { headerSize, dataStart, audioFormat, channels, sampleRate, bitsPerSample } = wavHeader;
+  const overlapSize = Math.floor(chunkSize * 0.05); // 5% overlap
+  
+  // Calculate bytes per sample to align chunks on sample boundaries
+  const bytesPerSample = (bitsPerSample / 8) * channels;
+  const alignedOverlapSize = Math.floor(overlapSize / bytesPerSample) * bytesPerSample;
+  const alignedChunkSize = Math.floor(chunkSize / bytesPerSample) * bytesPerSample;
+  
+  for (let start = dataStart; start < buffer.length; start += alignedChunkSize - alignedOverlapSize) {
+    const end = Math.min(start + alignedChunkSize, buffer.length);
+    const audioData = buffer.slice(start, end);
+    const audioDataSize = audioData.length;
+    
+    // Create new WAV chunk with proper header
+    const chunkWithHeader = createWAVChunkWithHeader(
+      audioData, 
+      audioFormat, 
+      channels, 
+      sampleRate, 
+      bitsPerSample
+    );
+    
+    chunks.push({
+      start: start - dataStart, // Relative to audio data start
+      end: end - dataStart,
+      data: chunkWithHeader,
+      hasOverlap: start > dataStart,
+      audioDataSize,
+      isPlayable: true
+    });
+    
+    if (end >= buffer.length) break;
+  }
+  
+  return chunks;
+}
+
+/**
+ * Parse WAV file header to extract format information
+ */
+function parseWAVHeader(buffer) {
+  try {
+    const view = new DataView(buffer.buffer || buffer);
+    
+    // Check RIFF header
+    const riff = new TextDecoder().decode(buffer.slice(0, 4));
+    if (riff !== 'RIFF') return null;
+    
+    // Check WAVE format
+    const wave = new TextDecoder().decode(buffer.slice(8, 12));
+    if (wave !== 'WAVE') return null;
+    
+    // Find fmt chunk
+    let offset = 12;
+    while (offset < buffer.length - 8) {
+      const chunkId = new TextDecoder().decode(buffer.slice(offset, offset + 4));
+      const chunkSize = view.getUint32(offset + 4, true);
+      
+      if (chunkId === 'fmt ') {
+        const audioFormat = view.getUint16(offset + 8, true);
+        const channels = view.getUint16(offset + 10, true);
+        const sampleRate = view.getUint32(offset + 12, true);
+        const bitsPerSample = view.getUint16(offset + 22, true);
+        
+        // Find data chunk
+        let dataOffset = offset + 8 + chunkSize;
+        while (dataOffset < buffer.length - 8) {
+          const dataChunkId = new TextDecoder().decode(buffer.slice(dataOffset, dataOffset + 4));
+          if (dataChunkId === 'data') {
+            return {
+              headerSize: dataOffset + 8,
+              dataStart: dataOffset + 8,
+              audioFormat,
+              channels,
+              sampleRate,
+              bitsPerSample
+            };
+          }
+          const dataChunkSize = view.getUint32(dataOffset + 4, true);
+          dataOffset += 8 + dataChunkSize;
+        }
+        break;
+      }
+      
+      offset += 8 + chunkSize;
+    }
+    
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Create a complete WAV file with header for a chunk of audio data
+ */
+function createWAVChunkWithHeader(audioData, audioFormat, channels, sampleRate, bitsPerSample) {
+  const dataSize = audioData.length;
+  const fileSize = 36 + dataSize;
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  const blockAlign = channels * (bitsPerSample / 8);
+  
+  // Create header buffer
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const headerBytes = new Uint8Array(header);
+  
+  // RIFF header
+  headerBytes.set(new TextEncoder().encode('RIFF'), 0);
+  view.setUint32(4, fileSize, true);
+  headerBytes.set(new TextEncoder().encode('WAVE'), 8);
+  
+  // fmt chunk
+  headerBytes.set(new TextEncoder().encode('fmt '), 12);
+  view.setUint32(16, 16, true); // fmt chunk size
+  view.setUint16(20, audioFormat, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  
+  // data chunk
+  headerBytes.set(new TextEncoder().encode('data'), 36);
+  view.setUint32(40, dataSize, true);
+  
+  // Combine header and audio data
+  const result = new Uint8Array(44 + dataSize);
+  result.set(headerBytes, 0);
+  result.set(audioData, 44);
+  
+  return result;
+}
 
 /**
  * Simple LLM correction using Groq (for post-processing)
@@ -1121,30 +1542,97 @@ function createChunks(buffer, chunkSize) {
  */
 async function applyLLMCorrection(text, apiKey) {
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 
-        'Authorization': `Bearer ${apiKey}`, 
-        'Content-Type': 'application/json' 
-      },
-      body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
-        messages: [{
-          role: 'user',
-          content: `Fix speech recognition errors, improve punctuation, and make this transcript more readable while preserving the original meaning and style. Output ONLY the corrected transcript with no preamble, introduction, or explanatory text:\n\n${text}`
-        }],
-        temperature: 0.1,
-        max_tokens: 131072
-      })
+    return await withLLMLimits(async () => {
+      const result = await withExponentialRetry(async () => {
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 
+            'Authorization': `Bearer ${apiKey}`, 
+            'Content-Type': 'application/json' 
+          },
+          body: JSON.stringify({
+            model: 'llama-3.1-8b-instant',
+            messages: [{
+              role: 'user',
+              content: `Fix speech recognition errors, improve punctuation, and make this transcript more readable while preserving the original meaning and style. Output ONLY the corrected transcript with no preamble, introduction, or explanatory text:\n\n${text}`
+            }],
+            temperature: 0.1,
+            max_tokens: 131072
+          })
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          const error = new Error(`LLM API error: ${response.status} ${response.statusText}`);
+          error.status = response.status;
+          error.response = { status: response.status };
+          error.details = errorData;
+          throw error;
+        }
+        
+        return await response.json();
+      }, {
+        maxRetries: 4, // Good balance for post-processing
+        baseDelay: 1000,
+        maxDelay: 20000
+      });
+      
+      return result.choices[0].message.content;
+    }, {
+      text_length: text.length,
+      operation: 'batch_llm_correction'
     });
-    
-    const result = await response.json();
-    return result.choices[0].message.content;
   } catch (error) {
-    processingLogger.error('LLM correction failed', error, { 
+    processingLogger.error('LLM correction failed after retries', error, { 
       original_length: text?.length || 0 
     });
     return text; // Return original if correction fails
+  }
+}
+
+/**
+ * Rate limit status endpoint for monitoring and debugging
+ * curl http://localhost:8787/rate-limit-status
+ */
+async function handleRateLimitStatus(request, env) {
+  try {
+    const status = getRateLimitStatus();
+    
+    return new Response(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      service: 'groq-whisper-xl',
+      rate_limits: status,
+      recommendations: {
+        transcription: status.transcription.waiting > 5 
+          ? 'Consider increasing TRANSCRIPTION_CONCURRENCY or reducing request rate'
+          : 'Rate limiting appears healthy',
+        llm: status.llm.waiting > 3
+          ? 'Consider increasing LLM_CONCURRENCY or reducing LLM correction usage'
+          : 'LLM rate limiting appears healthy',
+        job_spawn: status.job_spawn.waiting > 2
+          ? 'Job spawning is queued - large chunked uploads may be delayed'
+          : 'Job spawning appears healthy',
+        chunk_processing: status.chunk_processing.waiting > 5
+          ? 'Chunk processing is heavily queued - consider reducing concurrent uploads'
+          : 'Chunk processing appears healthy'
+      }
+    }, null, 2), {
+      status: 200,
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache'
+      }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({
+      error: 'Failed to get rate limit status',
+      message: error.message,
+      timestamp: new Date().toISOString()
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 }
 
@@ -1221,6 +1709,7 @@ async function handleListJobs(request, env) {
               use_llm: job.use_llm || false,
               llm_mode: job.llm_mode || null,
               chunk_size_mb: job.chunk_size_mb || null,
+              model: job.model || null,
               source_url: job.source_url || null,
               total_segments: job.total_segments || 0,
               success_rate: job.success_rate || null,
@@ -1447,4 +1936,478 @@ async function handleSaveStreamingJob(request, env) {
       headers: { 'Content-Type': 'application/json' }
     });
   }
+}
+
+/**
+ * Debug endpoint: List saved debug chunks for a job
+ * GET /debug/chunks?parent_job_id=uuid  (for chunked streaming)
+ * GET /debug/chunks?job_id=uuid         (for direct uploads)
+ */
+async function handleDebugChunksList(request, env) {
+  try {
+    const url = new URL(request.url);
+    const parent_job_id = url.searchParams.get('parent_job_id');
+    const job_id = url.searchParams.get('job_id');
+    const target_job_id = parent_job_id || job_id;
+
+    if (!target_job_id) {
+      return new Response(JSON.stringify({
+        error: 'parent_job_id or job_id parameter is required'
+      }), { 
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const debugChunks = [];
+    
+    if (parent_job_id) {
+      // Chunked streaming - use KV metadata
+      const keys = await env.GROQ_JOBS_KV.list({ prefix: `debug_${parent_job_id}_chunk_` });
+      
+      for (const key of keys.keys) {
+        try {
+          const debugInfoData = await env.GROQ_JOBS_KV.get(key.name);
+          if (debugInfoData) {
+            const debugInfo = JSON.parse(debugInfoData);
+            debugChunks.push({
+              ...debugInfo,
+              storage_type: 'r2'
+            });
+          }
+        } catch (error) {
+          console.error(`Failed to parse debug info for ${key.name}:`, error);
+        }
+      }
+    } else {
+      // Direct upload - try KV first, then R2 listing
+      const keys = await env.GROQ_JOBS_KV.list({ prefix: `debug_${job_id}_chunk_` });
+      
+      if (keys.keys.length > 0) {
+        // Found in KV
+        for (const key of keys.keys) {
+          try {
+            const debugInfoData = await env.GROQ_JOBS_KV.get(key.name);
+            if (debugInfoData) {
+              const debugInfo = JSON.parse(debugInfoData);
+              debugChunks.push({
+                ...debugInfo,
+                storage_type: 'r2'
+              });
+            }
+          } catch (error) {
+            console.error(`Failed to parse debug info for ${key.name}:`, error);
+          }
+        }
+      } else {
+        // Fall back to R2 listing
+        try {
+          const bucketName = env.R2_BUCKET_NAME || (env.ENVIRONMENT === 'development' ? 'groq-whisper-audio-preview' : 'groq-whisper-audio');
+          const s3Client = createS3Client(env);
+          
+          const listCmd = new ListObjectsV2Command({
+            Bucket: bucketName,
+            Prefix: `debug/${job_id}/`
+          });
+          
+          const response = await s3Client.send(listCmd);
+          if (response.Contents) {
+            for (const obj of response.Contents) {
+              if (obj.Key.endsWith('.mp3') || obj.Key.endsWith('.wav') || obj.Key.endsWith('.m4a')) {
+                const chunkMatch = obj.Key.match(/debug_chunk_[^_]+_(\d+)\./);
+                if (chunkMatch) {
+                  const r2Url = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${bucketName}/${obj.Key}`;
+                  debugChunks.push({
+                    parent_job_id: job_id,
+                    chunk_index: parseInt(chunkMatch[1]),
+                    filename: obj.Key.split('/').pop(),
+                    actual_size: obj.Size,
+                    saved_at: obj.LastModified.toISOString(),
+                    storage_type: 'r2',
+                    debug_key: obj.Key,
+                    bucket: bucketName,
+                    r2_url: r2Url,
+                    download_url: `/debug/chunk?job_id=${job_id}&chunk_index=${chunkMatch[1]}`
+                  });
+                }
+              }
+            }
+          }
+        } catch (r2Error) {
+          apiLogger.warn('Failed to list R2 debug chunks', r2Error);
+        }
+      }
+    }
+
+    // Sort by chunk index
+    debugChunks.sort((a, b) => a.chunk_index - b.chunk_index);
+
+    return new Response(JSON.stringify({
+      job_id: target_job_id,
+      debug_chunks: debugChunks,
+      count: debugChunks.length,
+      storage_type: 'r2',
+      environment: env.ENVIRONMENT || 'production'
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    apiLogger.error('Failed to list debug chunks', error);
+    return new Response(JSON.stringify({
+      error: 'Failed to list debug chunks',
+      message: error.message
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+/**
+ * Debug endpoint: Download a specific debug chunk
+ * GET /debug/chunk?parent_job_id=uuid&chunk_index=0  (for chunked streaming)
+ * GET /debug/chunk?job_id=uuid&chunk_index=0         (for direct uploads)
+ */
+async function handleDebugChunkDownload(request, env) {
+  try {
+    const url = new URL(request.url);
+    const parent_job_id = url.searchParams.get('parent_job_id');
+    const job_id = url.searchParams.get('job_id');
+    const target_job_id = parent_job_id || job_id;
+    const chunk_index = parseInt(url.searchParams.get('chunk_index'));
+
+    if (!target_job_id || chunk_index === undefined) {
+      return new Response(JSON.stringify({
+        error: 'parent_job_id or job_id, and chunk_index parameters are required'
+      }), { 
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Read from R2 (all debug chunks are stored there)
+    if (parent_job_id) {
+      // Chunked streaming path - use KV metadata
+      const debugInfoKey = `debug_${parent_job_id}_chunk_${chunk_index}`;
+      const debugInfoData = await env.GROQ_JOBS_KV.get(debugInfoKey);
+      
+      if (!debugInfoData) {
+        return new Response(JSON.stringify({
+          error: 'Debug chunk not found'
+        }), { 
+          status: 404,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      const debugInfo = JSON.parse(debugInfoData);
+      
+      // Download chunk from R2
+      const s3Client = createS3Client(env);
+      const getCmd = new GetObjectCommand({
+        Bucket: debugInfo.bucket,
+        Key: debugInfo.debug_key
+      });
+
+      const s3Response = await s3Client.send(getCmd);
+
+      return new Response(s3Response.Body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${debugInfo.filename}"`,
+          'Content-Length': debugInfo.actual_size.toString(),
+          'X-Debug-Info': JSON.stringify({
+            job_id: debugInfo.parent_job_id,
+            chunk_index: debugInfo.chunk_index,
+            original_filename: debugInfo.original_filename,
+            saved_at: debugInfo.saved_at,
+            storage_type: 'r2',
+            r2_url: debugInfo.r2_url || 'unavailable'
+          })
+        }
+      });
+    } else {
+      // Direct upload path - try KV first, then construct R2 key
+      const debugInfoKey = `debug_${job_id}_chunk_${chunk_index}`;
+      const debugInfoData = await env.GROQ_JOBS_KV.get(debugInfoKey);
+      
+      if (debugInfoData) {
+        // Found in KV
+        const debugInfo = JSON.parse(debugInfoData);
+        const s3Client = createS3Client(env);
+        const getCmd = new GetObjectCommand({
+          Bucket: debugInfo.bucket,
+          Key: debugInfo.debug_key
+        });
+
+        const s3Response = await s3Client.send(getCmd);
+
+        return new Response(s3Response.Body, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': `attachment; filename="${debugInfo.filename}"`,
+            'Content-Length': debugInfo.actual_size.toString(),
+            'X-Debug-Info': JSON.stringify({
+              job_id: debugInfo.parent_job_id,
+              chunk_index: debugInfo.chunk_index,
+              original_filename: debugInfo.original_filename,
+              saved_at: debugInfo.saved_at,
+              storage_type: 'r2',
+              r2_url: debugInfo.r2_url || 'unavailable'
+            })
+          }
+        });
+      } else {
+        // Construct R2 key directly
+        try {
+          const bucketName = env.R2_BUCKET_NAME || (env.ENVIRONMENT === 'development' ? 'groq-whisper-audio-preview' : 'groq-whisper-audio');
+          const s3Client = createS3Client(env);
+          
+          // Try common extensions
+          const extensions = ['mp3', 'wav', 'm4a', 'flac'];
+          let found = false;
+          let s3Response;
+          let debugKey;
+          
+          for (const ext of extensions) {
+            debugKey = `debug/${job_id}/debug_chunk_${job_id}_${chunk_index}.${ext}`;
+            try {
+              const getCmd = new GetObjectCommand({
+                Bucket: bucketName,
+                Key: debugKey
+              });
+              s3Response = await s3Client.send(getCmd);
+              found = true;
+              break;
+            } catch (error) {
+              // Try next extension
+              continue;
+            }
+          }
+          
+          if (!found) {
+            return new Response(JSON.stringify({
+              error: 'Debug chunk not found'
+            }), { 
+              status: 404,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+
+          const r2Url = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${bucketName}/${debugKey}`;
+          return new Response(s3Response.Body, {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'Content-Disposition': `attachment; filename="debug_chunk_${job_id}_${chunk_index}.${debugKey.split('.').pop()}"`,
+              'Content-Length': s3Response.ContentLength?.toString() || '0',
+              'X-Debug-Info': JSON.stringify({
+                job_id: job_id,
+                chunk_index: chunk_index,
+                debug_key: debugKey,
+                storage_type: 'r2',
+                r2_url: r2Url
+              })
+            }
+          });
+        } catch (r2Error) {
+          apiLogger.error('Failed to download debug chunk from R2', r2Error);
+          return new Response(JSON.stringify({
+            error: 'Failed to download debug chunk',
+            message: r2Error.message
+          }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+    }
+
+  } catch (error) {
+    apiLogger.error('Failed to download debug chunk', error);
+    return new Response(JSON.stringify({
+      error: 'Failed to download debug chunk',
+      message: error.message
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+/**
+ * Create MP3 chunks aligned to frame boundaries for API compatibility
+ */
+function createMP3Chunks(buffer, chunkSize) {
+  const chunks = [];
+  const framePositions = findMP3FramePositions(buffer);
+  
+  if (framePositions.length === 0) {
+    processingLogger.warn('No MP3 frames found, falling back to simple chunking');
+    return createChunks(buffer, chunkSize);
+  }
+  
+  const overlapFrames = Math.max(1, Math.floor(framePositions.length * 0.02)); // 2% overlap in frames
+  
+  let frameIndex = 0;
+  while (frameIndex < framePositions.length) {
+    const startPos = framePositions[frameIndex];
+    let endFrameIndex = frameIndex;
+    let currentSize = 0;
+    
+    // Find the end frame that doesn't exceed chunk size
+    while (endFrameIndex < framePositions.length - 1) {
+      const nextFrameStart = framePositions[endFrameIndex + 1];
+      const sizeWithNextFrame = nextFrameStart - startPos;
+      
+      if (sizeWithNextFrame > chunkSize) break;
+      
+      endFrameIndex++;
+      currentSize = sizeWithNextFrame;
+    }
+    
+    // Ensure we have at least one frame
+    if (endFrameIndex === frameIndex && frameIndex < framePositions.length - 1) {
+      endFrameIndex = frameIndex + 1;
+      currentSize = framePositions[endFrameIndex] - startPos;
+    } else if (endFrameIndex === frameIndex) {
+      // Last frame
+      currentSize = buffer.length - startPos;
+    }
+    
+    const endPos = endFrameIndex < framePositions.length - 1 ? 
+      framePositions[endFrameIndex + 1] : buffer.length;
+    
+    const chunkData = buffer.slice(startPos, endPos);
+    
+    chunks.push({
+      start: startPos,
+      end: endPos,
+      data: chunkData,
+      hasOverlap: frameIndex > 0,
+      isPlayable: true,
+      frameCount: endFrameIndex - frameIndex + 1
+    });
+    
+    // Move to next chunk with overlap
+    frameIndex = Math.max(frameIndex + 1, endFrameIndex + 1 - overlapFrames);
+    
+    if (endPos >= buffer.length) break;
+  }
+  
+  return chunks;
+}
+
+/**
+ * Find MP3 frame positions by looking for sync words
+ */
+function findMP3FramePositions(buffer) {
+  const positions = [];
+  const view = new DataView(buffer.buffer || buffer);
+  
+  for (let i = 0; i < buffer.length - 4; i++) {
+    // Look for MP3 sync word: 0xFF followed by 0xE0-0xFF (first 11 bits set)
+    if (buffer[i] === 0xFF && (buffer[i + 1] & 0xE0) === 0xE0) {
+      // Validate it's a real frame header
+      const frameInfo = parseMP3FrameHeader(view, i);
+      if (frameInfo && frameInfo.frameSize > 0) {
+        positions.push(i);
+        // Skip to next potential frame
+        i += frameInfo.frameSize - 1;
+      }
+    }
+  }
+  
+  return positions;
+}
+
+/**
+ * Parse MP3 frame header to get frame size
+ */
+function parseMP3FrameHeader(view, offset) {
+  try {
+    if (offset + 4 > view.byteLength) return null;
+    
+    const header = view.getUint32(offset, false); // Big endian
+    
+    // Check sync word (first 11 bits)
+    if ((header >>> 21) !== 0x7FF) return null;
+    
+    // Extract fields
+    const version = (header >>> 19) & 0x3;
+    const layer = (header >>> 17) & 0x3;
+    const bitrateIndex = (header >>> 12) & 0xF;
+    const samplingRateIndex = (header >>> 10) & 0x3;
+    const padding = (header >>> 9) & 0x1;
+    
+    // Skip invalid combinations
+    if (version === 1 || layer === 0 || bitrateIndex === 0 || bitrateIndex === 15 || samplingRateIndex === 3) {
+      return null;
+    }
+    
+    // Bitrate table (simplified for common cases)
+    const bitrates = {
+      // MPEG1 Layer III
+      '3-1': [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0],
+      // MPEG2 Layer III  
+      '2-1': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0]
+    };
+    
+    // Sample rates
+    const sampleRates = {
+      3: [44100, 48000, 32000], // MPEG1
+      2: [22050, 24000, 16000], // MPEG2
+      0: [11025, 12000, 8000]   // MPEG2.5
+    };
+    
+    const versionKey = version === 3 ? 3 : 2;
+    const layerKey = 4 - layer;
+    const bitrateKey = `${versionKey}-${layerKey}`;
+    
+    const bitrate = bitrates[bitrateKey]?.[bitrateIndex];
+    const sampleRate = sampleRates[versionKey]?.[samplingRateIndex];
+    
+    if (!bitrate || !sampleRate) return null;
+    
+    // Calculate frame size
+    const samplesPerFrame = version === 3 ? 1152 : 576; // MPEG1 vs MPEG2
+    const frameSize = Math.floor((samplesPerFrame * bitrate * 1000 / 8) / sampleRate) + padding;
+    
+    return { frameSize, bitrate, sampleRate };
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Create MP4/M4A chunks (placeholder - complex container format)
+ */
+function createMP4Chunks(buffer, chunkSize) {
+  // MP4 chunking is very complex as it requires parsing the container structure
+  // For now, fall back to simple chunking with a warning
+  processingLogger.warn('MP4/M4A chunking not yet implemented, using simple chunking (may cause API errors)');
+  processingLogger.info('Consider converting MP4/M4A files to WAV or MP3 for better chunking support');
+  return createChunks(buffer, chunkSize);
+}
+
+/**
+ * Create FLAC chunks (placeholder)
+ */
+function createFLACChunks(buffer, chunkSize) {
+  // FLAC chunking requires frame boundary detection
+  processingLogger.warn('FLAC chunking not yet implemented, using simple chunking (may cause API errors)');
+  return createChunks(buffer, chunkSize);
+}
+
+/**
+ * Create OGG chunks (placeholder)
+ */
+function createOGGChunks(buffer, chunkSize) {
+  // OGG chunking requires page boundary detection
+  processingLogger.warn('OGG chunking not yet implemented, using simple chunking (may cause API errors)');
+  return createChunks(buffer, chunkSize);
 }

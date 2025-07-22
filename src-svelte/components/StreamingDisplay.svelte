@@ -7,7 +7,7 @@
     isChunkedStreaming, showChunkedStreamingResults, chunkSlots, chunkedViewMode, chunkedProgress, 
     chunkedReadableTranscript, currentChunkedJobId, chunkedTotalChunks,
     chunkedUploadedChunks, chunkedCompletedChunks, chunkedFailedChunks, 
-    chunkedSuccessRate, formatBytes
+    chunkedSuccessRate, chunkedFileSize, formatBytes
   } from '../lib/stores.js';
   
   // Local state for elapsed time
@@ -57,6 +57,7 @@
       case 'processing': return 'border-yellow-400 bg-yellow-900/20 animate-pulse';
       case 'complete': return 'border-green-400 bg-green-900/20';
       case 'failed': return 'border-red-400 bg-red-900/20';
+      case 'skipped': return 'border-gray-400 bg-gray-900/20';
       default: return 'border-terminal-border bg-terminal-bg';
     }
   }
@@ -69,6 +70,7 @@
       case 'processing': return 'mdi:cog';
       case 'complete': return 'mdi:check-circle';
       case 'failed': return 'mdi:alert-circle';
+      case 'skipped': return 'mdi:skip-forward';
       default: return 'mdi:circle-outline';
     }
   }
@@ -192,11 +194,12 @@
           </div>
         </div>
         
-        <div class="text-xs text-terminal-text-dim mt-2 grid grid-cols-2 md:grid-cols-5 gap-2">
+        <div class="text-xs text-terminal-text-dim mt-2 grid grid-cols-2 md:grid-cols-6 gap-2">
           <span>Uploaded: {$chunkedUploadedChunks}/{$chunkedTotalChunks}</span>
           <span>Completed: {$chunkedCompletedChunks}/{$chunkedTotalChunks}</span>
           <span>Failed: {$chunkedFailedChunks}</span>
           <span>Success: {$chunkedSuccessRate}%</span>
+          <span>Size: {$chunkedFileSize || '-'}</span>
           <span>Elapsed: {formatTime(elapsedTime)}</span>
         </div>
       {:else}
@@ -269,7 +272,7 @@
               {#each $chunkSlots as slot, index}
                 <div 
                   class="border-2 p-2 text-center text-xs transition-all duration-300 {getChunkStatusColor(slot.status)}"
-                  title="Chunk {index}: {slot.status}{slot.processingTime ? ` (${slot.processingTime}ms)` : ''}"
+                  title="Chunk {index}: {slot.status}{slot.processingTime ? ` (${slot.processingTime}ms)` : ''}{slot.skipReason ? ` - ${slot.skipReason}` : ''}"
                 >
                   <div class="flex flex-col items-center gap-1">
                     <iconify-icon icon={getChunkStatusIcon(slot.status)} class="text-sm"></iconify-icon>
@@ -343,27 +346,116 @@
           </div>
         {/if}
         
-        <!-- Readable Transcript -->
-        <div class="border border-terminal-border bg-terminal-bg">
-          <div class="p-3 border-b border-terminal-border font-bold text-terminal-accent flex items-center gap-2">
-            <iconify-icon icon="mdi:text-box" class="text-lg"></iconify-icon> 
-            {#if $chunkedViewMode === 'speed'}
+        <!-- In Order Display -->
+        {#if $chunkedViewMode === 'order'}
+          <div class="border border-terminal-border bg-terminal-bg">
+            <div class="p-3 border-b border-terminal-border font-bold text-terminal-accent flex items-center gap-2">
+              <iconify-icon icon="mdi:sort-numeric-ascending" class="text-lg"></iconify-icon> 
+              In Order (Sequential)
+              <span class="text-xs text-terminal-text-dim ml-auto">
+                Ordered chunks • {$chunkSlots.filter(slot => slot && slot.status === 'complete').length}/{$chunkedTotalChunks} completed
+              </span>
+            </div>
+            <div class="p-4 max-h-80 overflow-y-auto space-y-3">
+              {#each $chunkSlots as slot, index}
+                {#if slot && slot.status === 'complete'}
+                  <!-- Completed chunk -->
+                  <div class="border border-green-800 bg-green-900/10 rounded">
+                    <div class="p-3">
+                      <div class="flex items-center gap-2 mb-2">
+                        <span class="font-bold text-green-800">Chunk {index}</span>
+                        {#if slot.processingTime}
+                          <span class="text-xs text-terminal-text-dim">
+                            ({slot.processingTime}ms)
+                          </span>
+                        {/if}
+                        {#if slot.completedAt}
+                          <span class="text-xs text-blue-400 font-mono">
+                            {formatTimestamp(slot.completedAt)}
+                          </span>
+                        {/if}
+                        {#if slot.llmApplied}
+                          <span class="text-xs bg-purple-600 text-white px-2 py-1 rounded">LLM</span>
+                        {/if}
+                      </div>
+                      
+                      <details class="group">
+                        <summary class="cursor-pointer text-sm font-mono text-terminal-text hover:text-terminal-accent transition-colors list-none">
+                          <div class="flex items-center gap-2">
+                            <span class="text-xs text-terminal-text-dim group-open:rotate-90 transition-transform">▶</span>
+                            <span class="italic">"{getTextPreview(slot.text, 80)}"</span>
+                          </div>
+                        </summary>
+                        <div class="mt-3 pl-4 border-l-2 border-green-800/30">
+                          <div class="text-sm font-mono whitespace-pre-wrap text-terminal-text">
+                            "{slot.text}"
+                          </div>
+                          {#if slot.rawText && slot.text !== slot.rawText}
+                            <div class="mt-2 pt-2 border-t border-terminal-border">
+                              <div class="text-xs text-terminal-text-dim mb-1">Raw transcript:</div>
+                              <div class="text-sm font-mono whitespace-pre-wrap text-terminal-text-dim">
+                                "{slot.rawText}"
+                              </div>
+                            </div>
+                          {/if}
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                {:else}
+                  <!-- Pending/waiting chunk -->
+                  <div class="border border-gray-600 bg-gray-800/20 rounded">
+                    <div class="p-3">
+                      <div class="flex items-center gap-2 mb-2">
+                        <span class="font-bold text-gray-400">Chunk {index}</span>
+                        <span class="text-xs bg-gray-700 text-gray-300 px-2 py-1 rounded">
+                          {#if slot && slot.status === 'uploading'}
+                            Uploading...
+                          {:else if slot && slot.status === 'processing'}
+                            Processing...
+                          {:else if slot && slot.status === 'failed'}
+                            Failed
+                          {:else}
+                            Waiting
+                          {/if}
+                        </span>
+                      </div>
+                      <div class="text-sm text-gray-500 italic">
+                        {#if slot && slot.status === 'failed' && slot.error}
+                          Error: {slot.error}
+                        {:else if slot && slot.status === 'uploading'}
+                          Upload in progress...
+                        {:else if slot && slot.status === 'processing'}
+                          Transcription in progress...
+                        {:else}
+                          Waiting for previous chunks to complete
+                        {/if}
+                      </div>
+                    </div>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          </div>
+        {:else}
+          <!-- Readable Transcript (for speed mode) -->
+          <div class="border border-terminal-border bg-terminal-bg">
+            <div class="p-3 border-b border-terminal-border font-bold text-terminal-accent flex items-center gap-2">
+              <iconify-icon icon="mdi:text-box" class="text-lg"></iconify-icon> 
               Readable Transcript (Ordered)
-            {:else}
-              Readable Transcript (In Order)
-            {/if}
+            </div>
+            <div 
+              id="chunked-readable-transcript"
+              class="p-4 max-h-80 overflow-y-auto font-mono text-sm leading-relaxed"
+            >
+              {#if $chunkedReadableTranscript}
+                <pre class="whitespace-pre-wrap">{$chunkedReadableTranscript}</pre>
+              {:else}
+                <div class="text-terminal-text-dim italic">Waiting for chunks to complete in order...</div>
+              {/if}
+            </div>
           </div>
-          <div 
-            id="chunked-readable-transcript"
-            class="p-4 max-h-80 overflow-y-auto font-mono text-sm leading-relaxed"
-          >
-            {#if $chunkedReadableTranscript}
-              <pre class="whitespace-pre-wrap">{$chunkedReadableTranscript}</pre>
-            {:else}
-              <div class="text-terminal-text-dim italic">Waiting for chunks to complete in order...</div>
-            {/if}
-          </div>
-        </div>
+        {/if}
       </div>
       
     {:else}

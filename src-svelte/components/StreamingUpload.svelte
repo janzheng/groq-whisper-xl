@@ -7,7 +7,7 @@
     isChunkedStreaming, showChunkedStreamingResults, chunkedStreamingMode, chunkSlots, chunkedViewMode, 
     chunkedProgress, chunkedReadableTranscript, currentChunkedJobId,
     chunkedTotalChunks, chunkedUploadedChunks, chunkedCompletedChunks, 
-    chunkedFailedChunks, chunkedSuccessRate,
+    chunkedFailedChunks, chunkedSuccessRate, chunkedFileSize,
     initializeChunkSlots, updateChunkSlot, resetChunkedStreaming
   } from '../lib/stores.js';
   import { streamLogger } from '../lib/logger.js';
@@ -18,12 +18,19 @@
   let sourceMode = 'file'; // 'file' or 'url'
   let selectedFile = null;
   let url = '';
-  let chunkSizeMB = 0.25;
+  let chunkSizeMB = 10; // Default chunk size (10MB is smaller chunks than 20MB)
   let chunkedChunkSizeMB = 5; // Different default for chunked mode
   let llmMode = 'disabled'; // 'disabled', 'per_chunk', 'post_process'
+  let selectedModel = 'whisper-large-v3'; // Default model
   let uploadAreaElement;
   let fileInput;
   let uploadAreaContent = getDefaultUploadAreaContent();
+  
+  // Available Whisper models
+  const whisperModels = [
+    { value: 'whisper-large-v3', label: 'Whisper Large v3 (Default)' },
+    { value: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo (Faster)' }
+  ];
   
   // Streaming state
   let currentAbortController = null;
@@ -32,6 +39,11 @@
   
   // Chunked streaming state
   let chunkedEventSource = null;
+  let currentChunkedFilename = ''; // Track actual filename during chunked streaming
+  let forceUIUpdate = 0; // Force reactivity trigger
+  
+  // Debug options
+  let debugSaveChunks = false; // Debug option to save chunks to temp folder
   
   function getDefaultUploadAreaContent() {
     return {
@@ -46,12 +58,28 @@
     const description = $chunkedStreamingMode 
       ? 'Click "Chunked Stream" to upload in chunks with real-time processing'
       : 'Click "Live Transcribe" to start';
+    
+    // Check file type and warn about potential issues
+    const fileExt = file.name.split('.').pop().toLowerCase();
+    const audioFormats = ['mp3', 'wav', 'flac', 'm4a', 'ogg', 'webm'];
+    const videoFormats = ['mp4', 'mov', 'avi', 'mkv', 'webm'];
+    
+    let warning = '';
+    let icon = 'mdi:file-music';
+    
+    if (videoFormats.includes(fileExt)) {
+      warning = '⚠️ Video file detected. Audio will be extracted for transcription.';
+      icon = 'mdi:file-video';
+    } else if (!audioFormats.includes(fileExt)) {
+      warning = '⚠️ Unusual file format. Transcription may fail.';
+      icon = 'mdi:file-question';
+    }
       
     uploadAreaContent = {
-      icon: 'mdi:file-music',
+      icon: icon,
       title: file.name,
       subtitle: `Ready to ${mode} transcribe (${formatBytes(file.size)})`,
-      description: description
+      description: warning || description
     };
     selectedFile = file;
   }
@@ -83,14 +111,18 @@
     
     const files = Array.from(e.dataTransfer.files);
     if (files.length > 0) {
-      updateUploadAreaWithFile(files[0]);
+      const newFile = files[0];
+      selectedFile = newFile; // Set selectedFile first
+      updateUploadAreaWithFile(newFile); // Then update UI
     }
   }
   
   function handleFileSelect(e) {
     const files = Array.from(e.target.files);
     if (files.length > 0) {
-      updateUploadAreaWithFile(files[0]);
+      const newFile = files[0];
+      selectedFile = newFile; // Set selectedFile first
+      updateUploadAreaWithFile(newFile); // Then update UI
     }
   }
   
@@ -105,28 +137,43 @@
     }
   }
   
-  // Update upload area when chunked mode changes
+  // Update upload area when chunked mode changes or file selection changes
   $: if (selectedFile) {
     updateUploadAreaWithFile(selectedFile);
   }
   
-  function getButtonText() {
+  // Also update when chunked streaming mode toggles
+  $: if (selectedFile && $chunkedStreamingMode !== undefined) {
+    updateUploadAreaWithFile(selectedFile);
+  }
+  
+  // Debug reactive updates
+  $: if ($chunkedUploadedChunks || $chunkedProgress || forceUIUpdate) {
+    console.log('🔄 UI Reactive update triggered:', {
+      uploadedChunks: $chunkedUploadedChunks,
+      progress: $chunkedProgress,
+      forceUIUpdate,
+      timestamp: Date.now()
+    });
+  }
+  
+  // Reactive button text
+  $: buttonText = (() => {
     if ($isStreaming || $isChunkedStreaming) {
-      const filename = $isChunkedStreaming ? $currentChunkedJobId : $currentStreamingFilename;
+      const filename = $isChunkedStreaming ? currentChunkedFilename : $currentStreamingFilename;
       const mode = $isChunkedStreaming ? 'Chunked Streaming' : 'Streaming';
       return `🔄 ${mode} ${filename}...`;
     }
     
-    if (sourceMode === 'file') {
-      if ($chunkedStreamingMode) {
-        return selectedFile ? `Chunked Stream ${selectedFile.name}` : 'Select File for Chunked Streaming';
-      } else {
-        return selectedFile ? `Live Transcribe ${selectedFile.name}` : 'Select File to Transcribe';
-      }
+    // Check if we have the required input based on source mode
+    const hasInput = sourceMode === 'file' ? selectedFile : url.trim();
+    
+    if (hasInput) {
+      return $chunkedStreamingMode ? 'Start Chunked Streaming' : 'Start Live Streaming';
     } else {
-      return $chunkedStreamingMode ? 'Chunked Stream URL' : 'Live Transcribe URL';
+      return sourceMode === 'file' ? 'Select Audio File' : 'Enter Audio URL';
     }
-  }
+  })();
   
   function startNewStreaming() {
     // Reset appropriate results display when starting a new job
@@ -150,7 +197,16 @@
     $streamStartTime = Date.now();
     elapsedTimer = setInterval(() => {
       elapsedTime = Math.floor((Date.now() - $streamStartTime) / 1000);
+      forceUIUpdate++; // Trigger reactivity every second
     }, 1000);
+  }
+  
+  // Listen for manual progress updates
+  if (typeof window !== 'undefined') {
+    window.addEventListener('chunk-progress-update', (event) => {
+      console.log('📊 Received progress update event:', event.detail);
+      forceUIUpdate++; // Force reactivity
+    });
   }
   
   function stopElapsedTimer() {
@@ -167,9 +223,15 @@
   async function handleStartChunkedStreaming() {
     if ($isChunkedStreaming) return;
     
-    let options = {
-      chunkSizeMB: chunkedChunkSizeMB,
-      useLLM: llmMode !== 'disabled'
+    const options = {
+      filename: sourceMode === 'file' ? selectedFile.name : url.split('/').pop() || 'audio',
+      file: sourceMode === 'file' ? selectedFile : null,
+      url: sourceMode === 'url' ? url : null,
+      chunkSizeMB,
+      useLLM: llmMode !== 'disabled',
+      llmMode: llmMode, // Pass the selected LLM mode
+      model,
+      debugSaveChunks
     };
     
     // Only pass llm_mode if LLM is enabled
@@ -203,42 +265,118 @@
       $currentChunkedJobId = result.parent_job_id;
       $chunkedTotalChunks = result.chunk_info.total_chunks;
       
+      // Store the actual filename for display
+      currentChunkedFilename = options.filename;
+      
+      // Set file size for display
+      if (selectedFile) {
+        $chunkedFileSize = formatBytes(selectedFile.size);
+      } else if (result.job && result.job.file_size) {
+        $chunkedFileSize = formatBytes(result.job.file_size);
+      }
+      
       // Initialize chunk slots
       initializeChunkSlots(result.chunk_info.total_chunks);
+      
+              // Set initial progress to show upload starting
+        $chunkedProgress = { upload: 0, processing: 0, overall: 0 };
+        $chunkedUploadedChunks = 0;
+        $chunkedCompletedChunks = 0;
+        $chunkedFailedChunks = 0;
+        $chunkedSuccessRate = 0;
+        
+        console.log('🎬 Chunked streaming initialized with progress reset');
       
       startElapsedTimer();
       
       // Start SSE stream for real-time updates
+      console.log('🌊 Starting SSE stream for job:', result.parent_job_id);
       chunkedEventSource = await createChunkedStreamEventSource(result.parent_job_id);
+      
+      chunkedEventSource.onopen = function(event) {
+        console.log('✅ SSE connection opened:', event);
+      };
+      
       chunkedEventSource.onmessage = handleChunkedStreamEvent;
       chunkedEventSource.onerror = handleChunkedStreamError;
       
+      // Add a timeout to check if SSE is working and send keepalive
+      setTimeout(() => {
+        if (chunkedEventSource && chunkedEventSource.readyState === EventSource.CONNECTING) {
+          console.warn('⚠️ SSE connection still connecting after 5 seconds');
+        } else if (chunkedEventSource && chunkedEventSource.readyState === EventSource.CLOSED) {
+          console.warn('⚠️ SSE connection closed unexpectedly');
+        } else {
+          console.log('✅ SSE connection status:', chunkedEventSource?.readyState === EventSource.OPEN ? 'OPEN' : 'OTHER');
+        }
+      }, 5000);
+      
+      // Add periodic SSE health check
+      const sseHealthCheck = setInterval(() => {
+        if (!chunkedEventSource || chunkedEventSource.readyState === EventSource.CLOSED) {
+          console.log('🔌 SSE connection lost, cleaning up health check');
+          clearInterval(sseHealthCheck);
+          return;
+        }
+        
+        if (chunkedEventSource.readyState === EventSource.CONNECTING) {
+          console.warn('⚠️ SSE still connecting...');
+        } else if (chunkedEventSource.readyState === EventSource.OPEN) {
+          console.log('💓 SSE connection healthy');
+        }
+      }, 10000); // Check every 10 seconds
+      
       // Start uploading chunks if we have a file
+      // Handle upload based on mode
       if (options.file) {
-        try {
-          const uploadResults = await uploadChunksInParallel(
-            options.file, 
-            result.upload_urls, 
-            result.parent_job_id,
-            3 // max concurrent uploads
-          );
+        // NEW: Check if server already processed the file (audio-aware chunking)
+        if (result.message && result.message.includes('audio-aware processing')) {
+          console.log('✅ Server-side audio-aware chunking completed, skipping client-side upload');
+          console.log('📊 Chunking results:', {
+            total_chunks: result.chunk_info.total_chunks,
+            chunking_method: result.chunk_info.chunking_method,
+            playable_chunks: result.chunk_info.playable_chunks
+          });
           
-          // Check for upload failures
-          const failures = uploadResults.filter(r => !r.success);
-          if (failures.length > 0) {
-            console.error('Some chunks failed to upload:', failures);
-            streamLogger.error('Some chunks failed to upload', { failures });
+          // File is already uploaded and chunked, processing should start automatically
+          streamLogger.info('Audio-aware chunking completed on server', {
+            total_chunks: result.chunk_info.total_chunks,
+            chunking_method: result.chunk_info.chunking_method
+          });
+          
+        } else if (result.upload_urls) {
+          // LEGACY: Old client-side chunking mode (for URL uploads or fallback)
+          console.log('⚠️ Using legacy client-side chunking mode');
+          try {
+            const uploadResults = await uploadChunksInParallel(
+              options.file, 
+              result.upload_urls, 
+              result.parent_job_id,
+              3 // max concurrent uploads
+            );
+            
+            // Check for upload failures
+            const failures = uploadResults.filter(r => !r.success);
+            if (failures.length > 0) {
+              console.error('Some chunks failed to upload:', failures);
+              streamLogger.error('Some chunks failed to upload', { failures });
+            }
+            
+          } catch (uploadError) {
+            console.error('Upload chunks failed:', uploadError);
+            streamLogger.error('Upload chunks failed', uploadError);
+            alert(`Upload failed: ${uploadError.message}`);
+            stopChunkedStreaming();
+            return;
           }
-          
-        } catch (uploadError) {
-          console.error('Upload chunks failed:', uploadError);
-          streamLogger.error('Upload chunks failed', uploadError);
-          alert(`Upload failed: ${uploadError.message}`);
+        } else {
+          console.error('Unexpected response format - no upload URLs or processing confirmation');
+          alert('Unexpected server response format');
           stopChunkedStreaming();
           return;
         }
       } else {
-        console.log('No file provided, expecting URL upload handling');
+        console.log('URL upload - processing handled by server');
       }
       
     } catch (error) {
@@ -251,7 +389,9 @@
   
   function handleChunkedStreamEvent(event) {
     try {
+      console.log('🔄 SSE Event received:', event.data);
       const data = JSON.parse(event.data);
+      console.log('📡 Parsed SSE data:', data);
       handleChunkedEvent(data);
     } catch (error) {
       console.error('Failed to parse chunked SSE data:', error, event.data);
@@ -259,7 +399,9 @@
   }
   
   function handleChunkedStreamError(error) {
-    console.log('Chunked SSE error event:', error);
+    console.log('❌ Chunked SSE error event:', error);
+    console.log('🔌 SSE readyState:', chunkedEventSource?.readyState);
+    console.log('🔄 Is still streaming?', $isChunkedStreaming);
     
     // Check if this is just a normal stream closure after completion
     if (chunkedEventSource && chunkedEventSource.readyState === EventSource.CLOSED) {
@@ -271,6 +413,7 @@
       // Only log as error if we're still expecting the stream to be active
       if ($isChunkedStreaming) {
         streamLogger.warn('Chunked stream closed unexpectedly while still processing');
+        console.warn('⚠️ Stream closed but still expecting updates - this might indicate a connection issue');
       }
       
       return;
@@ -278,15 +421,23 @@
     
     // This is an actual error
     streamLogger.error('Chunked stream error', error);
-    console.error('Chunked SSE error:', error);
+    console.error('❌ Chunked SSE error:', error);
     
     // Only show user-facing error if we're still actively streaming
     if ($isChunkedStreaming) {
-      alert('Stream connection lost. Check console for details.');
+      console.error('💥 Stream connection lost during active streaming');
+      // Don't show alert immediately, wait a bit to see if it recovers
+      setTimeout(() => {
+        if ($isChunkedStreaming && (!chunkedEventSource || chunkedEventSource.readyState === EventSource.CLOSED)) {
+          alert('Stream connection lost. Check console for details. The upload may still be processing.');
+        }
+      }, 5000);
     }
   }
   
   async function handleChunkedEvent(data) {
+    console.log('🎯 Processing SSE event:', data.type, data);
+    
     switch (data.type) {
       case 'initialized':
         $chunkedTotalChunks = data.total_chunks;
@@ -294,36 +445,144 @@
           parent_job_id: data.parent_job_id,
           total_chunks: data.total_chunks
         });
+        
+        // Update file size if server provides actual size (for URL uploads)
+        if (data.total_size && data.total_size > 0 && !$chunkedFileSize) {
+          $chunkedFileSize = formatBytes(data.total_size);
+        }
         break;
         
       case 'progress_update':
-        $chunkedProgress = {
-          upload: data.upload_progress || 0,
-          processing: data.processing_progress || 0,
-          overall: data.progress || 0
-        };
-        $chunkedUploadedChunks = data.uploaded_chunks || 0;
-        $chunkedCompletedChunks = data.completed_chunks || 0;
-        $chunkedFailedChunks = data.failed_chunks || 0;
-        $chunkedSuccessRate = data.success_rate || 0;
+        console.log('📊 SSE Progress update received:', {
+          upload: data.upload_progress,
+          processing: data.processing_progress,
+          overall: data.progress,
+          uploaded_chunks: data.uploaded_chunks,
+          completed_chunks: data.completed_chunks
+        });
+        
+        // Get current values for comparison
+        const currentProgress = get(chunkedProgress);
+        const currentUploaded = $chunkedUploadedChunks;
+        
+        console.log('📊 Current vs SSE progress:', {
+          current: {
+            upload: currentProgress.upload,
+            processing: currentProgress.processing,
+            overall: currentProgress.overall,
+            uploaded_chunks: currentUploaded
+          },
+          sse: {
+            upload: data.upload_progress,
+            processing: data.processing_progress,
+            overall: data.progress,
+            uploaded_chunks: data.uploaded_chunks
+          }
+        });
+        
+        // Only update if SSE has valid data (not 0 or undefined)
+        // and is reasonably higher than current (allow some fluctuation)
+        const newUploadProgress = (data.upload_progress || 0) > 0 ? 
+          Math.max(currentProgress.upload || 0, data.upload_progress) : 
+          currentProgress.upload || 0;
+          
+        const newProcessingProgress = (data.processing_progress || 0) > 0 ? 
+          Math.max(currentProgress.processing || 0, data.processing_progress) : 
+          currentProgress.processing || 0;
+          
+        const newOverallProgress = (data.progress || 0) > 0 ? 
+          Math.max(currentProgress.overall || 0, data.progress) : 
+          currentProgress.overall || 0;
+          
+        const newUploadedChunks = (data.uploaded_chunks || 0) >= 0 ? 
+          Math.max(currentUploaded || 0, data.uploaded_chunks) : 
+          currentUploaded || 0;
+        
+        // Only update if there's actually a meaningful change
+        const hasSignificantChange = 
+          Math.abs(newUploadProgress - (currentProgress.upload || 0)) > 0 ||
+          Math.abs(newProcessingProgress - (currentProgress.processing || 0)) > 0 ||
+          Math.abs(newOverallProgress - (currentProgress.overall || 0)) > 0 ||
+          Math.abs(newUploadedChunks - (currentUploaded || 0)) > 0;
+        
+        if (hasSignificantChange) {
+          console.log('📊 Updating progress stores:', {
+            from: currentProgress,
+            to: { upload: newUploadProgress, processing: newProcessingProgress, overall: newOverallProgress },
+            uploadedChunks: { from: currentUploaded, to: newUploadedChunks }
+          });
+          
+          $chunkedProgress = {
+            upload: newUploadProgress,
+            processing: newProcessingProgress,
+            overall: newOverallProgress
+          };
+          $chunkedUploadedChunks = newUploadedChunks;
+          $chunkedCompletedChunks = data.completed_chunks || $chunkedCompletedChunks;
+          $chunkedFailedChunks = data.failed_chunks || $chunkedFailedChunks;
+          $chunkedSuccessRate = data.success_rate || $chunkedSuccessRate;
+        } else {
+          console.log('📊 Skipping SSE progress update - no significant change detected');
+        }
         break;
         
       case 'chunk_complete':
-        // Update the specific chunk slot with completion data
+        console.log('🎯 Chunk completed:', data);
+        
+        // Update chunk slot
         updateChunkSlot(data.chunk_index, {
           status: 'complete',
-          text: data.text,
-          rawText: data.raw_text || data.text,
+          text: data.text || data.transcript,
+          rawText: data.raw_text || data.text || data.transcript,
           correctedText: data.corrected_text,
-          processingTime: data.processing_time,
-          llmApplied: data.llm_applied || false
+          llmApplied: data.llm_applied || false,
+          processingTime: data.processing_time || 0,
+          completedAt: new Date().toISOString(),
+          arrivalOrder: ($chunkedCompletedChunks || 0) + 1 // Track arrival order for speed mode
         });
         
-        // Update readable transcript if we're in order mode or if this creates a contiguous sequence
+        // Update counters
+        $chunkedCompletedChunks = ($chunkedCompletedChunks || 0) + 1;
+        
+        updateProgress();
+        updateReadableTranscript();
+        break;
+        
+      case 'chunk_skipped':
+        console.log('⏭️ Chunk skipped:', data);
+        
+        // Handle skipped chunks (usually chunk 0 with metadata)
+        updateChunkSlot(data.chunk_index, {
+          status: 'skipped',
+          text: '',
+          rawText: '',
+          correctedText: '',
+          llmApplied: false,
+          processingTime: 0,
+          completedAt: new Date().toISOString(),
+          skipReason: data.reason,
+          arrivalOrder: ($chunkedCompletedChunks || 0) + 1
+        });
+        
+        // Count skipped chunks as completed for progress purposes
+        $chunkedCompletedChunks = ($chunkedCompletedChunks || 0) + 1;
+        
+        // Show user-friendly notification for chunk 0
+        if (data.chunk_index === 0) {
+          console.log('📋 Chunk 0 skipped: This is normal for files with metadata/headers');
+          // You could add a toast notification here if desired
+        }
+        
+        updateProgress();
         updateReadableTranscript();
         break;
         
       case 'chunk_failed':
+        console.error('❌ Chunk failure received:', {
+          chunk_index: data.chunk_index,
+          error: data.error
+        });
+        
         updateChunkSlot(data.chunk_index, {
           status: 'failed',
           error: data.error
@@ -335,6 +594,19 @@
         break;
         
       case 'final_result':
+        console.log('🏁 Final result received:', {
+          success_rate: data.success_rate,
+          transcript_length: data.final_transcript?.length || 0,
+          failed_chunks: data.failed_chunks,
+          successful_chunks: data.successful_chunks
+        });
+        
+        // Check if transcription actually succeeded
+        if (!data.final_transcript || data.final_transcript.trim() === '') {
+          console.error('❌ Final result has empty transcript!');
+          alert('Transcription completed but no text was generated. This may be due to audio format issues or silent audio.');
+        }
+        
         // Mark job as completed
         $chunkedProgress = { upload: 100, processing: 100, overall: 100 };
         
@@ -370,27 +642,21 @@
         });
         
         // Refresh jobs list to show the completed chunked upload job
-        try {
-          // Trigger multiple jobs refreshes to ensure the chunked job is captured
-          // Sometimes the server needs a moment to fully process the completion
-          const refreshAttempts = [500, 1500, 3000]; // Try at 0.5s, 1.5s, and 3s
-          refreshAttempts.forEach((delay, index) => {
-            setTimeout(async () => {
-              try {
-                await fetchJobs();
-                streamLogger.info(`Jobs refresh attempt ${index + 1} completed after chunked streaming`);
-              } catch (refreshError) {
-                streamLogger.error(`Jobs refresh attempt ${index + 1} failed after chunked streaming`, refreshError);
-              }
-            }, delay);
-          });
-        } catch (error) {
-          streamLogger.error('Failed to refresh jobs after chunked streaming', error);
-        }
+        setTimeout(async () => {
+          try {
+            await fetchJobs();
+            streamLogger.info('Jobs refreshed after chunked streaming completion');
+          } catch (refreshError) {
+            streamLogger.error('Failed to refresh jobs after chunked streaming', refreshError);
+          }
+        }, 1000); // Single refresh after 1 second
         
         // Set show results flag and clean up streaming state
         $showChunkedStreamingResults = true;
         $isChunkedStreaming = false;
+        
+        // Clear filename tracking
+        currentChunkedFilename = '';
         
         // Close event source but keep results visible
         if (chunkedEventSource) {
@@ -410,22 +676,43 @@
         
         stopElapsedTimer();
         
-        // Reset form state after a brief delay
+        // Reset form state after a brief delay, but preserve selected file
         setTimeout(() => {
-          if (sourceMode === 'file') {
-            resetUploadArea();
-          } else {
+          if (sourceMode === 'url') {
             url = '';
           }
+          // Don't reset upload area immediately - let user keep the file selected
         }, 2000);
         break;
         
       case 'job_terminated':
+        console.error('💀 Job terminated:', {
+          reason: data.reason,
+          status: data.status,
+          partial_results: data.partial_results
+        });
+        
         streamLogger.error('Chunked job terminated', { 
           reason: data.reason,
           status: data.status 
         });
+        
+        if (data.reason && data.reason.includes('No valid chunks')) {
+          alert('Transcription failed: No valid audio chunks found. This may be due to:\n• Unsupported audio format\n• Silent or corrupted audio\n• Audio encoding issues\n\nTry converting to MP3 or WAV format.');
+        }
+        
         stopChunkedStreaming();
+        break;
+        
+      case 'stream_error':
+        console.error('🚨 Stream error received:', data);
+        if (data.error && data.error.includes('No valid chunks')) {
+          alert('Stream error: No valid chunks found for transcription. Check the console for details.');
+        }
+        break;
+        
+      default:
+        console.log('🤷 Unknown SSE event type:', data.type, data);
         break;
     }
   }
@@ -471,13 +758,15 @@
     $isChunkedStreaming = false;
     stopElapsedTimer();
     
-    // Reset form state after a brief delay
+    // Clear filename tracking
+    currentChunkedFilename = '';
+    
+    // Reset form state after a brief delay, but preserve selected file
     setTimeout(() => {
-      if (sourceMode === 'file') {
-        resetUploadArea();
-      } else {
+      if (sourceMode === 'url') {
         url = '';
       }
+      // Don't reset upload area immediately - let user keep the file selected
     }, 2000);
   }
 
@@ -502,6 +791,7 @@
       const formData = new FormData();
       formData.append('file', selectedFile);
       formData.append('chunk_size_mb', chunkSizeMB.toString());
+      formData.append('model', selectedModel);
       
       if (llmMode !== 'disabled') {
         formData.append('use_llm', 'true');
@@ -524,7 +814,8 @@
       filename = url.split('/').pop() || 'audio file';
       const payload = {
         url: url.trim(),
-        chunk_size_mb: chunkSizeMB
+        chunk_size_mb: chunkSizeMB,
+        model: selectedModel
       };
       
       if (llmMode !== 'disabled') {
@@ -763,19 +1054,15 @@
             await saveStreamingJob(completingJob);
             streamLogger.info('Saved streaming job to server', { job_id: completingJob.job_id });
             
-            // Trigger multiple jobs refreshes to ensure the update is captured
-            // Sometimes the server needs a moment to fully process the save
-            const refreshAttempts = [500, 1500, 3000]; // Try at 0.5s, 1.5s, and 3s
-            refreshAttempts.forEach((delay, index) => {
-              setTimeout(async () => {
-                try {
-                  await fetchJobs();
-                  streamLogger.info(`Jobs refresh attempt ${index + 1} completed after streaming`);
-                } catch (refreshError) {
-                  streamLogger.error(`Jobs refresh attempt ${index + 1} failed after streaming`, refreshError);
-                }
-              }, delay);
-            });
+            // Refresh jobs list after streaming completion
+            setTimeout(async () => {
+              try {
+                await fetchJobs();
+                streamLogger.info('Jobs refreshed after streaming completion');
+              } catch (refreshError) {
+                streamLogger.error('Failed to refresh jobs after streaming', refreshError);
+              }
+            }, 1000); // Single refresh after 1 second
             
           } catch (error) {
             streamLogger.error('Failed to save streaming job to server', error);
@@ -830,13 +1117,12 @@
     // Don't reset $currentStreamingFilename - keep it for display
     stopElapsedTimer();
     
-    // Reset form state after a brief delay
+    // Reset form state after a brief delay, but preserve selected file
     setTimeout(() => {
-      if (sourceMode === 'file') {
-        resetUploadArea();
-      } else {
+      if (sourceMode === 'url') {
         url = '';
       }
+      // Don't reset upload area immediately - let user keep the file selected
     }, 2000);
   }
   
@@ -944,6 +1230,24 @@
   <div class="mb-4 flex-1">
     <div class="font-bold mb-2">Settings:</div>
     <div class="space-y-3">
+      <div>
+        <label for="model-select-streaming" class="text-terminal-text-dim block mb-1">Whisper model:</label>
+        <select 
+          id="model-select-streaming"
+          bind:value={selectedModel}
+          disabled={$isStreaming || $isChunkedStreaming}
+          class="bg-terminal-bg-light border border-terminal-border text-terminal-text px-3 py-2 w-full focus:outline-none focus:border-terminal-accent"
+          class:opacity-50={$isStreaming || $isChunkedStreaming}
+        >
+          {#each whisperModels as model}
+            <option value={model.value}>{model.label}</option>
+          {/each}
+        </select>
+        <div class="text-xs text-terminal-text-dim mt-1">
+          💡 <strong>Turbo:</strong> Faster processing, <strong>v3:</strong> Higher accuracy
+        </div>
+      </div>
+      
       <!-- Streaming Mode Toggle -->
       <div>
         <label class="text-terminal-text-dim block mb-1">Streaming mode:</label>
@@ -997,6 +1301,9 @@
             <option value={20}>20MB (Very large chunks)</option>
             <option value={50}>50MB (Maximum size)</option>
           </select>
+          <div class="text-xs text-terminal-text-dim mt-1">
+            💡 <strong>Tip:</strong> Files with lots of metadata (album art, tags) benefit from larger chunks (10MB+) to ensure the first chunk contains enough audio for transcription.
+          </div>
         {:else}
           <select 
             id="chunk-size"
@@ -1027,6 +1334,34 @@
           <option value="post_process">Post-process (better quality)</option>
         </select>
       </div>
+
+      <div>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" bind:checked={debugSaveChunks} class="w-4 h-4">
+          <iconify-icon icon="mdi:brain" class="text-terminal-accent"></iconify-icon>
+          <span class="text-terminal-accent">LLM Error Correction</span>
+          <span class="text-terminal-text-dim">(Improves accuracy)</span>
+        </label>
+      </div>
+
+      <!-- Debug Options -->
+      <div class="border border-terminal-border p-2">
+        <div class="text-terminal-text font-bold mb-2 text-sm">🐛 Debug Options</div>
+        <div>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" bind:checked={debugSaveChunks} class="w-4 h-4">
+            <iconify-icon icon="mdi:folder-download" class="text-terminal-text-dim"></iconify-icon>
+            <span class="text-terminal-text">Save chunks to debug storage</span>
+            <span class="text-terminal-text-dim text-xs">(For troubleshooting chunk issues)</span>
+          </label>
+          {#if debugSaveChunks}
+            <div class="text-xs text-terminal-text-dim mt-1 ml-6">
+              ⚠️ Chunks will be saved to R2 debug storage for inspection. 
+              Check logs for full R2 URLs to access files directly.
+            </div>
+          {/if}
+        </div>
+      </div>
     </div>
   </div>
   
@@ -1043,11 +1378,7 @@
       <iconify-icon icon="mdi:stop"></iconify-icon> Stop Streaming
     {:else}
       <iconify-icon icon="mdi:waveform"></iconify-icon>
-    {/if}
-    {#if !$isStreaming && !$isChunkedStreaming}
-      {getButtonText()}
-    {:else}
-      Stop Streaming
+      {buttonText}
     {/if}
   </button>
 </div>

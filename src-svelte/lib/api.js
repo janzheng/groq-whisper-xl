@@ -1,6 +1,37 @@
-import { jobs, API_BASE } from './stores.js';
+import { jobs, API_BASE, chunkedProgress, chunkedUploadedChunks, updateChunkSlot } from './stores.js';
 import { webLogger } from './logger.js';
 import { get } from 'svelte/store';
+
+/**
+ * Determine if a local job should be kept when it doesn't exist on the server
+ */
+function isRecentLocalJob(job) {
+  const now = Date.now();
+  const jobAge = now - new Date(job.created_at).getTime();
+  const maxAge = 5 * 60 * 1000; // 5 minutes
+  
+  // Always keep currently active streaming jobs
+  if (job.processing_method === 'streaming' && (job.status === 'processing' || job.status === 'uploading')) {
+    return true;
+  }
+  
+  // Always keep currently active chunked streaming jobs  
+  if (job.processing_method === 'chunked_upload_streaming' && (job.status === 'processing' || job.status === 'uploading')) {
+    return true;
+  }
+  
+  // Keep recent streaming jobs (might not be saved to server yet)
+  if (job.processing_method === 'streaming' && jobAge < maxAge) {
+    return true;
+  }
+  
+  // Remove everything else:
+  // - Old completed jobs
+  // - Sub-jobs from completed chunked uploads  
+  // - Failed jobs that have been cleaned up
+  // - Direct upload jobs (these should always exist on server)
+  return false;
+}
 
 export async function fetchJobs() {
   try {
@@ -43,9 +74,16 @@ export async function fetchJobs() {
             } : {})
           });
         } else {
-          // Job doesn't exist on server yet (streaming job or very recent upload)
-          // Keep the local job as-is
-          updatedJobs.push(localJob);
+          // Job doesn't exist on server - decide whether to keep it
+          const shouldKeepLocalJob = isRecentLocalJob(localJob);
+          
+          if (shouldKeepLocalJob) {
+            // Keep recent streaming jobs or active chunked uploads that might not be saved yet
+            updatedJobs.push(localJob);
+          } else {
+            // Remove old jobs that no longer exist on server (e.g., cleaned up sub-jobs)
+            console.log('Removing local job that no longer exists on server:', localJob.job_id.slice(0, 8) + '...', localJob.processing_method);
+          }
         }
       }
       
@@ -80,10 +118,13 @@ export async function fetchJobs() {
   }
 }
 
-export async function uploadFile(file, useLLM, webhookUrl) {
+export async function uploadFile(file, useLLM = false, webhookUrl = null, model = 'whisper-large-v3', chunkSizeMB = 10, debugSaveChunks = false) {
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('use_llm', useLLM.toString());
+  formData.append('use_llm', useLLM);
+  formData.append('model', model);
+  formData.append('chunk_size_mb', chunkSizeMB.toString());
+  formData.append('debug_save_chunks', debugSaveChunks.toString());
   
   if (webhookUrl) {
     formData.append('webhook_url', webhookUrl);
@@ -94,71 +135,120 @@ export async function uploadFile(file, useLLM, webhookUrl) {
     body: formData
   });
   
-  if (response.ok) {
-    const result = await response.json();
-    
-    // Add to jobs list immediately
-    const currentJobs = get(jobs);
-    const newJob = {
-      job_id: result.job_id,
-      filename: result.filename,
-      status: 'processing', // Changed to 'processing' since it's queued immediately
-      file_size: result.file_size,
-      processing_method: result.processing_method,
-      upload_method: 'direct',
-      use_llm: useLLM,
-      created_at: new Date().toISOString()
-    };
-    
-    jobs.set([newJob, ...currentJobs]);
-    return result;
-  } else {
-    const error = await response.json();
-    throw new Error(error.error || 'Upload failed');
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(error);
   }
+  
+  const result = await response.json();
+  await fetchJobs(); // Refresh the jobs list immediately
+  
+  // For direct uploads, set up more frequent polling to catch completion faster
+  if (result.job_id) {
+    // Check for completion more frequently for this specific job
+    const jobId = result.job_id;
+    console.log('Setting up completion monitoring for direct upload job:', jobId);
+    
+    const completionChecker = setInterval(async () => {
+      try {
+        console.log('Checking direct upload job completion:', jobId);
+        await fetchJobs();
+        
+        // Check if this specific job is now complete
+        const currentJobs = get(jobs);
+        const targetJob = currentJobs.find(job => job.job_id === jobId);
+        
+        if (targetJob && targetJob.status === 'done') {
+          console.log('Direct upload job completed:', jobId);
+          clearInterval(completionChecker);
+          
+          // Trigger a final refresh to ensure transcript is available
+          setTimeout(() => fetchJobs(), 500);
+        } else if (targetJob && targetJob.status === 'failed') {
+          console.log('Direct upload job failed:', jobId);
+          clearInterval(completionChecker);
+        } else if (!targetJob) {
+          console.log('Direct upload job no longer found, stopping monitoring:', jobId);
+          clearInterval(completionChecker);
+        }
+      } catch (error) {
+        console.error('Error monitoring job completion:', error);
+      }
+    }, 2000); // Check every 2 seconds
+    
+    // Stop monitoring after 10 minutes max (cleanup safety)
+    setTimeout(() => {
+      clearInterval(completionChecker);
+      console.log('Stopped monitoring job completion after timeout:', jobId);
+    }, 600000); // 10 minutes
+  }
+  
+  return result;
 }
 
-export async function uploadFromUrl(url, useLLM, webhookUrl) {
-  const payload = {
-    url: url,
-    use_llm: useLLM
-  };
-  
-  if (webhookUrl) {
-    payload.webhook_url = webhookUrl;
-  }
-  
+export async function uploadFromUrl(url, useLLM = false, webhookUrl = null, model = 'whisper-large-v3', chunkSizeMB = 10, debugSaveChunks = false) {
   const response = await fetch(API_BASE + '/upload-url', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ 
+      url, 
+      use_llm: useLLM, 
+      webhook_url: webhookUrl,
+      model,
+      chunk_size_mb: chunkSizeMB,
+      debug_save_chunks: debugSaveChunks
+    })
   });
   
-  if (response.ok) {
-    const result = await response.json();
-    
-    // Add to jobs list immediately
-    const currentJobs = get(jobs);
-    const newJob = {
-      job_id: result.job_id,
-      filename: result.filename,
-      status: 'processing', // Changed to 'processing' since it's queued immediately
-      file_size: result.file_size,
-      processing_method: result.processing_method,
-      upload_method: 'url',
-      source_url: result.source_url,
-      use_llm: useLLM,
-      created_at: new Date().toISOString()
-    };
-    
-    jobs.set([newJob, ...currentJobs]);
-    return result;
-  } else {
-    const error = await response.json();
-    throw new Error(error.error || 'URL upload failed');
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(error);
   }
+  
+  const result = await response.json();
+  await fetchJobs(); // Refresh the jobs list immediately
+  
+  // For direct uploads, set up more frequent polling to catch completion faster
+  if (result.job_id) {
+    // Check for completion more frequently for this specific job
+    const jobId = result.job_id;
+    console.log('Setting up completion monitoring for URL upload job:', jobId);
+    
+    const completionChecker = setInterval(async () => {
+      try {
+        console.log('Checking URL upload job completion:', jobId);
+        await fetchJobs();
+        
+        // Check if this specific job is now complete
+        const currentJobs = get(jobs);
+        const targetJob = currentJobs.find(job => job.job_id === jobId);
+        
+        if (targetJob && targetJob.status === 'done') {
+          console.log('URL upload job completed:', jobId);
+          clearInterval(completionChecker);
+          
+          // Trigger a final refresh to ensure transcript is available
+          setTimeout(() => fetchJobs(), 500);
+        } else if (targetJob && targetJob.status === 'failed') {
+          console.log('URL upload job failed:', jobId);
+          clearInterval(completionChecker);
+        } else if (!targetJob) {
+          console.log('URL upload job no longer found, stopping monitoring:', jobId);
+          clearInterval(completionChecker);
+        }
+      } catch (error) {
+        console.error('Error monitoring job completion:', error);
+      }
+    }, 2000); // Check every 2 seconds
+    
+    // Stop monitoring after 10 minutes max (cleanup safety)
+    setTimeout(() => {
+      clearInterval(completionChecker);
+      console.log('Stopped monitoring job completion after timeout:', jobId);
+    }, 600000); // 10 minutes
+  }
+  
+  return result;
 }
 
 export async function deleteJob(jobId) {
@@ -380,78 +470,90 @@ export async function saveStreamingJob(job) {
 // CHUNKED STREAMING API FUNCTIONS
 // ============================================================================
 
+// Helper function to extract file extension
+function getFileExtension(filename) {
+  if (!filename) return 'mp3';
+  const ext = filename.split('.').pop()?.toLowerCase();
+  return ext || 'mp3';
+}
+
 export async function initializeChunkedUpload(options) {
   const {
     filename,
     file,
     url,
-    chunkSizeMB = 5,
+    chunkSizeMB = 10,
     useLLM = false,
     llmMode = 'per_chunk',
-    webhookUrl = null
+    model = 'whisper-large-v3',
+    debugSaveChunks = false
   } = options;
 
-  let totalSize;
-  
-  // Determine total size based on input type
+  // NEW: Use full file upload with server-side audio-aware chunking
   if (file) {
-    totalSize = file.size;
-  } else if (url) {
-    // For URLs, we'll let the server determine size
-    // This is a placeholder - you might want to fetch HEAD first for size
-    totalSize = 0; // Server will determine actual size
-  } else {
-    throw new Error('Either file or url must be provided');
+    // Upload the complete file and let server do audio-aware chunking
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('chunk_size_mb', chunkSizeMB.toString());
+    formData.append('use_llm', useLLM.toString());
+    formData.append('model', model);
+    formData.append('debug_save_chunks', debugSaveChunks.toString());
+    
+    if (useLLM) {
+      formData.append('llm_mode', llmMode);
+    }
+
+    const response = await fetch(API_BASE + '/chunked-upload-stream', {
+      method: 'POST',
+      body: formData // Send as FormData to trigger new server-side chunking mode
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to initialize chunked upload: ${errorText}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ Server-side audio-aware chunking completed:', {
+      total_chunks: result.chunk_info.total_chunks,
+      chunking_method: result.chunk_info.chunking_method,
+      playable_chunks: result.chunk_info.playable_chunks
+    });
+    
+    return result;
   }
+  
+  // EXISTING: URL-based uploads still use JSON mode
+  if (url) {
+    const payload = {
+      filename,
+      url,
+      chunk_size_mb: chunkSizeMB,
+      use_llm: useLLM,
+      model,
+      debug_save_chunks: debugSaveChunks
+    };
 
-  const payload = {
-    filename: filename || (file ? file.name : url.split('/').pop()),
-    total_size: totalSize,
-    chunk_size_mb: chunkSizeMB,
-    use_llm: useLLM,
-    llm_mode: llmMode,
-    webhook_url: webhookUrl
-  };
+    if (useLLM) {
+      payload.llm_mode = llmMode;
+    }
 
-  const response = await fetch(API_BASE + '/chunked-upload-stream', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
+    const response = await fetch(API_BASE + '/chunked-upload-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to initialize chunked upload');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to initialize chunked upload: ${errorText}`);
+    }
+
+    const result = await response.json();
+    return result;
   }
-
-  const result = await response.json();
   
-  // Add to jobs list immediately
-  const currentJobs = get(jobs);
-  const newJob = {
-    job_id: result.parent_job_id,
-    filename: payload.filename,
-    status: 'uploading',
-    file_size: totalSize,
-    processing_method: 'chunked_upload_streaming',
-    upload_method: 'chunked_streaming',
-    use_llm: useLLM,
-    llm_mode: llmMode,
-    chunk_size_mb: chunkSizeMB,
-    total_chunks: result.chunk_info.total_chunks,
-    uploaded_chunks: 0,
-    completed_chunks: 0,
-    failed_chunks: 0,
-    created_at: new Date().toISOString(),
-    type: 'chunked_upload_streaming'
-  };
-  
-  jobs.set([newJob, ...currentJobs]);
-  
-  return {
-    ...result,
-    job: newJob
-  };
+  throw new Error('Either file or url must be provided');
 }
 
 export async function uploadChunksInParallel(file, uploadUrls, parentJobId, maxConcurrent = 3) {
@@ -466,6 +568,33 @@ export async function uploadChunksInParallel(file, uploadUrls, parentJobId, maxC
     throw new Error('No upload URLs provided');
   }
 
+  let completedUploads = 0;
+  const totalUploads = uploadUrls.length;
+  
+  // Use a local counter only - don't interfere with SSE progress updates
+  const uploadTracker = {
+    completed: 0,
+    total: totalUploads,
+    updateProgress() {
+      this.completed++;
+      console.log(`📊 Local upload tracker: ${this.completed}/${this.total} completed`);
+      
+      // DON'T update global stores here - let SSE handle all progress updates
+      // This prevents the race condition between client and server progress
+      console.log('📊 Letting SSE handle all progress updates to avoid race conditions');
+       
+      // Only dispatch a local event for immediate UI feedback if needed
+      const forceUpdateEvent = new CustomEvent('chunk-upload-complete', {
+        detail: { uploaded: this.completed, total: this.total }
+      });
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(forceUpdateEvent);
+      }
+       
+      return this.completed;
+    }
+  };
+
   const uploadPromises = uploadUrls.map(async (urlInfo, index) => {
     console.log(`Starting upload for chunk ${index}:`, {
       chunkIndex: urlInfo.chunk_index,
@@ -477,21 +606,79 @@ export async function uploadChunksInParallel(file, uploadUrls, parentJobId, maxC
     // Extract chunk data from file
     const chunkStart = urlInfo.byte_range[0];
     const chunkEnd = urlInfo.byte_range[1] + 1; // byte_range is inclusive, slice is exclusive
+    
+    // Validate byte ranges
+    if (chunkStart < 0 || chunkEnd > file.size || chunkStart >= chunkEnd) {
+      throw new Error(`Invalid byte range for chunk ${urlInfo.chunk_index}: [${chunkStart}, ${chunkEnd}) with file size ${file.size}`);
+    }
+    
     const chunk = file.slice(chunkStart, chunkEnd);
+    
+    // Enhanced debugging for chunk 0 to detect corruption
+    if (urlInfo.chunk_index === 0) {
+      console.log(`🔍 Chunk 0 detailed analysis:`, {
+        originalFileSize: file.size,
+        originalFileType: file.type,
+        chunkStart,
+        chunkEnd,
+        sliceLength: chunkEnd - chunkStart,
+        actualChunkSize: chunk.size,
+        expectedSize: urlInfo.expected_size
+      });
+      
+      // Read first few bytes of chunk 0 to check for corruption
+      const reader = new FileReader();
+      const firstBytes = await new Promise((resolve, reject) => {
+        reader.onload = e => resolve(new Uint8Array(e.target.result));
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(chunk.slice(0, Math.min(64, chunk.size)));
+      });
+      
+      const zeroCount = Array.from(firstBytes).filter(byte => byte === 0).length;
+      const zeroPercentage = (zeroCount / firstBytes.length) * 100;
+      
+      console.log(`🔍 Chunk 0 content analysis:`, {
+        first64Bytes: Array.from(firstBytes).map(b => b.toString(16).padStart(2, '0')).join(' '),
+        zeroCount,
+        zeroPercentage: zeroPercentage.toFixed(1),
+        suspicious: zeroPercentage > 25 // More than 25% zeros is suspicious for MP3
+      });
+      
+      if (zeroPercentage > 25) {
+        console.warn(`⚠️ Chunk 0 has ${zeroPercentage.toFixed(1)}% zeros - possible corruption!`);
+      }
+    }
     
     console.log(`Chunk ${index} data:`, {
       chunkIndex: urlInfo.chunk_index,
       chunkSize: chunk.size,
       expectedStart: chunkStart,
-      expectedEnd: chunkEnd
+      expectedEnd: chunkEnd,
+      expectedSize: urlInfo.expected_size,
+      sizeMatch: chunk.size === urlInfo.expected_size
     });
     
     try {
       // Upload chunk to Worker (instead of directly to R2)
       console.log(`Uploading chunk ${urlInfo.chunk_index} to Worker...`);
       
+      // Create explicit blob with proper MIME type to prevent FormData issues
+      const chunkBlob = new Blob([chunk], { 
+        type: file.type || 'audio/mpeg' // Use original file type or default to audio/mpeg
+      });
+      
+      if (urlInfo.chunk_index === 0) {
+        console.log(`🔍 Chunk 0 FormData details:`, {
+          originalFileType: file.type,
+          chunkBlobType: chunkBlob.type,
+          chunkBlobSize: chunkBlob.size,
+          chunkSize: chunk.size,
+          sizesMatch: chunkBlob.size === chunk.size
+        });
+      }
+      
       const formData = new FormData();
-      formData.append('chunk', chunk, `chunk.${urlInfo.chunk_index}`);
+      formData.append('chunk', chunkBlob, `chunk.${urlInfo.chunk_index}.${getFileExtension(file.name || 'audio.mp3')}`);
       formData.append('parent_job_id', parentJobId);
       formData.append('chunk_index', urlInfo.chunk_index.toString());
       formData.append('expected_size', urlInfo.expected_size.toString());
@@ -514,6 +701,16 @@ export async function uploadChunksInParallel(file, uploadUrls, parentJobId, maxC
       
       const responseData = await uploadResponse.json();
       console.log(`Chunk ${urlInfo.chunk_index} completed successfully:`, responseData);
+      
+      // Update local tracking only - SSE will handle global progress
+      const currentCount = uploadTracker.updateProgress();
+      
+      // Update chunk slot to show upload complete (this is safe since it's per-chunk)
+      console.log(`📊 Updating chunk slot ${urlInfo.chunk_index} to processing`);
+      updateChunkSlot(urlInfo.chunk_index, {
+        status: 'processing', // Mark as processing since upload is done
+        uploadProgress: 100
+      });
       
       return {
         chunkIndex: urlInfo.chunk_index,
